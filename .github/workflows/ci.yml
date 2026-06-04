@@ -115,7 +115,9 @@ jobs:
       - name: Syntax & lint (bash -n + shellcheck)
         run: |
           bash -n install.sh
-          shellcheck install.sh || true   # advisory; do not fail the build on style
+          bash -n claude-hook.sh
+          shellcheck install.sh || true        # advisory; do not fail the build on style
+          shellcheck -S error claude-hook.sh    # claude-hook.sh must be error-clean
 
       - name: Regression — empty ARGS must expand to ZERO words (curl | bash no-op bug)
         run: |
