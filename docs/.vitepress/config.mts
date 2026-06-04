@@ -18,6 +18,7 @@ export default defineConfig({
           { text: 'Installation', link: '/guide/installation' },
           { text: 'Quick Start', link: '/guide/quickstart' },
           { text: 'Configuration', link: '/guide/configuration' },
+          { text: 'Claude Code Integration', link: '/guide/claude-code' },
         ]
       },
       {

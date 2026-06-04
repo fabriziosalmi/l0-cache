@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.1.2] - 2026-06-04
 
+### Added
+- `claude-hook.sh`: an optional, off-by-default transparent integration for
+  Claude Code. It installs a `PreToolUse` hook that routes the *simple* Bash
+  commands Claude Code runs through `l0-cache`, so the model never has to prefix
+  anything. Conservative (compound/piped/redirected/interactive/stateful commands
+  pass through untouched), fail-safe (any error or a missing `l0-cache`/`jq`
+  leaves the command unchanged, and it never sets a `permissionDecision`), and
+  toggleable at runtime with no restart (`install`/`enable`/`disable`/`status`/
+  `uninstall`). See the Claude Code Integration guide.
+
 ### Fixed
 - Memory is now bounded on a giant newline-free stream (e.g. a minified bundle).
   Line reading no longer uses `read_until`, which buffered the entire line before

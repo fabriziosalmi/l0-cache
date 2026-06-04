@@ -126,6 +126,52 @@ l0-cache --token-factor 8 cargo test
 --version            Print version with git commit hash
 ```
 
+## Claude Code Integration (optional)
+
+Normally you (or your AI assistant) prefix a command with `l0-cache` explicitly.
+For [Claude Code](https://claude.com/claude-code), the bundled `claude-hook.sh`
+can do that **for you, transparently**: it installs a
+[`PreToolUse`](https://docs.claude.com/en/docs/claude-code/hooks) hook that
+rewrites the *simple* Bash commands Claude Code runs so they go through
+`l0-cache` — the model never has to prefix anything.
+
+It is **off by default** and designed to stay out of the way:
+
+- **Conservative** — only a single, simple program invocation is ever wrapped.
+  Anything with shell operators (`&&`, `||`, `;`, `|`, redirects, `$(...)`,
+  backticks, `&`), multiple lines, stateful builtins (`cd`, `export`, `source`,
+  `eval`, `exec`, `set`, …), shell constructs (`for`/`while`/`if`/`case`), or
+  interactive/TUI/REPL programs (`vim`, `less`, `ssh`, `python`, `psql`, …) is
+  passed through **untouched**. Already-wrapped commands are left as-is.
+- **Fail-safe** — if `l0-cache` or `jq` is missing, or anything errors, the
+  command runs unchanged. The hook never blocks a command and never sets a
+  `permissionDecision`, so wrapped commands still go through your normal
+  Claude Code permissions.
+- **Runtime toggle** — enable/disable instantly, no restart.
+
+```sh
+./claude-hook.sh install     # write the wrapper + register the hook (idempotent; needs jq)
+./claude-hook.sh enable      # turn it ON  (instant)
+./claude-hook.sh disable     # turn it OFF (instant)
+./claude-hook.sh status      # show install/enabled state + l0-cache version
+./claude-hook.sh uninstall   # remove the hook registration and wrapper
+```
+
+> **Activation:** after `install` (or any change to `settings.json`), start a
+> **new** Claude Code session so the hook is loaded — hooks are read at session
+> startup. The `enable`/`disable` toggle then takes effect immediately.
+
+The hook honors `$CLAUDE_CONFIG_DIR` and `$XDG_CONFIG_HOME`. It edits Claude
+Code's `settings.json` (saving a timestamped backup) and stores its on/off state
+as an empty toggle file at `~/.config/l0-cache/hook.enabled`.
+
+> [!NOTE]
+> `l0-cache` is not a persistent cache — it filters output on the fly and does
+> not store results to replay. The only thing written to disk is the metrics log
+> (see [Metrics](#metrics)). If a session shows no savings, the hook simply
+> never wrapped a command in it — confirm with `l0-cache --stats` and
+> `./claude-hook.sh status`.
+
 ## Safety Guard
 
 When `l0-cache` detects it is running inside an AI coding assistant (Claude Code,
@@ -260,30 +306,6 @@ l0-cache --completions zsh > ~/.zsh/completions/_l0-cache
 # Fish
 l0-cache --completions fish > ~/.config/fish/completions/l0-cache.fish
 ```
-
-## Claude Code integration (optional)
-
-Normally you prefix a command yourself (`l0-cache cargo test`). To let Claude Code
-do that automatically for noisy commands — with nothing to remember — there is an
-opt-in [`PreToolUse`](https://docs.claude.com/en/docs/claude-code/hooks) hook,
-managed by `claude-hook.sh`:
-
-```sh
-./claude-hook.sh install     # write the wrapper + register the hook (needs jq)
-./claude-hook.sh enable      # turn it ON  (instant on/off, no restart)
-# → start a new Claude Code session so the hook loads
-./claude-hook.sh disable     # turn it OFF immediately
-./claude-hook.sh status      # installed? registered? on/off + version
-./claude-hook.sh uninstall   # remove it
-```
-
-The hook is **conservative and fail-safe**: it only wraps simple single commands
-and passes through anything risky — pipes, `&&`/`||`, redirects, `cd`/`export`,
-command substitution, multi-line, and interactive programs — unchanged. Any error
-makes the command run exactly as sent, and it does **not** auto-approve commands
-(they still go through your normal permission rules). It is **off by default** and
-toggled by a sentinel file (`~/.config/l0-cache/hook.enabled`), so you can disable
-it instantly if anything misbehaves. Honors `$CLAUDE_CONFIG_DIR` / `$XDG_CONFIG_HOME`.
 
 ## Known Limitations
 

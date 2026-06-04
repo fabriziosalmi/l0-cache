@@ -44,7 +44,10 @@ to understand what happened.
 ## Design Principles
 
 - **Universal**: works with any command, no per-tool parsers
-- **Transparent**: no shell hooks, no aliases, explicit invocation only
+- **Unintrusive**: the binary never rewrites your shell, aliases, or `$PATH` --
+  you invoke it explicitly. An optional, off-by-default
+  [Claude Code hook](./claude-code) can do the prefixing for you, and is just as
+  conservative about what it touches.
 - **Safe**: never modifies the child command's behavior
 - **Lightweight**: single Rust binary, zero runtime dependencies
 - **Observable**: every invocation logs metrics for analysis

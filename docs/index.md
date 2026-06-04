@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: Universal Filtering
-    details: Works with any command. No per-tool parsers, no shell hooks, no aliases. Prefix with l0-cache.
+    details: Works with any command. No per-tool parsers and no alias rewriting -- just prefix with l0-cache, or enable the optional Claude Code hook.
   - title: Zero Overhead
     details: Single-threaded, synchronous Rust binary. Sub-millisecond overhead. 700 KB on disk.
   - title: Production Hardened
