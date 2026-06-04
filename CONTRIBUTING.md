@@ -8,8 +8,8 @@ Please follow these guidelines to set up your environment, run tests, and submit
 
 ### Prerequisites
 
-- **Rust**: Version 1.78 or newer is required (the MSRV is verified in CI; the
-  committed `Cargo.lock` uses the v4 format, which needs cargo ≥ 1.78).
+- **Rust**: Version 1.85 or newer is required (the MSRV is verified in CI). The
+  floor is set by dependencies — `clap` 4.6 requires the `edition2024` feature.
 - **Node.js & npm**: Version 20 or newer (only needed for editing and building the documentation).
 
 ### Cloning the Repository

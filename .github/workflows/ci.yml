@@ -56,16 +56,16 @@ jobs:
         run: ./target/release/l0-cache --no-auto echo "ci-smoke" | grep -q ci-smoke
 
   msrv:
-    name: Minimum Supported Rust (1.78)
+    name: Minimum Supported Rust (1.85)
     runs-on: ubuntu-latest
     needs: quality
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      # 1.78 is the floor: the committed Cargo.lock is format v4, which only
-      # cargo >= 1.78 can parse (the crates themselves build on slightly older).
-      - name: Install Rust 1.78
-        uses: dtolnay/rust-toolchain@1.78.0
+      # The floor is driven by dependencies, not our code: clap 4.6 requires the
+      # edition2024 cargo feature, stabilized in Rust 1.85.
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@1.85.0
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: cargo check (build, not tests)
