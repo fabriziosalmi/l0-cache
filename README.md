@@ -100,26 +100,57 @@ l0-cache --token-factor 8 cargo test
 ## Options
 
 ```
---raw                No truncation, still logs metrics
+--raw                Print output verbatim (no head/tail truncation, no collapsing
+                     or JSON squashing); ANSI is still stripped and a 1 MB/line and
+                     256 MB total OOM cap still apply. Metrics are still logged.
 -i, --interactive    Passthrough mode (stdin/stdout/stderr inherited)
 --head N             Lines to keep from start (default: 30)
 --tail N             Lines to keep from end (default: 30)
 --tail-error N       Tail lines on non-zero exit (default: 120)
 --threshold N        Only truncate if output exceeds N lines (default: 100)
+--only-errors        Keep only lines matching error/warn/fail/panic/exception/etc.
+--idle-timeout N     SIGKILL the command (and its process group) after N seconds with
+                     no output (prevents interactive-prompt deadlocks). 0 = off.
 --no-auto            Disable adaptive auto-tuning of parameters
+--quiet, -q          Suppress l0-cache's own stderr notices (e.g. auto-tuning)
+--guard              Force-enable the safety guard (see "Safety Guard" below)
+--no-guard           Force-disable the safety guard
 --doctor             Diagnose system installation, shell environment, and active LLM editors
 --auto-floor N       Floor for success optimization decay (default: 10)
 --auto-ceiling N     Ceiling for failure backoff tail expansion (default: 1000)
 --token-factor N     Divisor for token estimation (default: 4)
 --stats              Show token savings report
 --since DURATION     Filter stats (e.g. 7d, 24h, 30m)
+--reset-stats        Delete ALL recorded telemetry (destructive, cannot be undone)
 --completions SHELL  Generate shell completions (bash, zsh, fish, elvish, powershell)
 --version            Print version with git commit hash
 ```
 
+## Safety Guard
+
+When `l0-cache` detects it is running inside an AI coding assistant (Claude Code,
+Gemini CLI, Cursor/VS Code terminals), it enables a **best-effort** guard that
+blocks a few obviously destructive commands before they run, exiting with code
+**126**:
+
+- recursive force-removal of a critical system path (`rm -rf /`, `/etc`, `/usr`, …),
+  including inside `sh -c "…"` wrappers and with trailing-slash/glob variants;
+- reverse shells / socket redirections (`/dev/tcp`, `/dev/udp`);
+- credential exfiltration (`curl`/`wget`/`nc`/`ssh` touching `id_rsa`, `.env`, `shadow`, …);
+- `DROP DATABASE` via `psql`/`mysql`/`sqlite3`/`sqlcmd`.
+
+Control it explicitly with `--guard` / `--no-guard`, or the `L0_CACHE_GUARD`
+environment variable (`1`/`true`/`on` to force on, `0`/`false`/`off` to force off).
+Precedence: `--no-guard` → `--guard` → `L0_CACHE_GUARD` → auto-detect.
+
+> This is a guard rail, not a sandbox. It pattern-matches argv and shell payloads
+> and can be bypassed by a determined caller — do not rely on it as a security
+> boundary. Bypass an intentional command with `--no-guard`.
+
 ## Architecture
 
-Single-threaded, synchronous design. Zero async, zero threads.
+Single-threaded, synchronous design. Zero async. The only thread ever spawned is
+an optional output-inactivity watchdog, and only when `--idle-timeout` is set.
 
 ```
 l0-cache <command>
@@ -149,7 +180,11 @@ l0-cache <command>
 
 ### Signal Handling
 
-- SIGINT/SIGTERM: ignored in `l0-cache`, delivered to child via process group
+- The captured child runs in its own process group. `l0-cache` installs SIGINT
+  and SIGTERM handlers that **forward** the signal to that group, so Ctrl-C and a
+  directed `kill <pid>` (or `timeout`, systemd, `docker stop`) terminate the whole
+  child subtree — not just the `sh` wrapper — and `l0-cache` then propagates the
+  child's status.
 - SIGPIPE: ignored in `l0-cache`, BrokenPipe handled in code so metrics are logged
   before exit
 - Exit codes: POSIX 128+N convention for signal-killed children
@@ -160,7 +195,7 @@ Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
 
 ```json
 {
-  "ts": "2024-01-15T10:30:00.000Z",
+  "ts": "2024-01-15T10:30:00Z",
   "cmd": "cargo",
   "args": "test --all",
   "bytes_raw": 15000,
@@ -258,7 +293,7 @@ environments:
 ## Development
 
 ```sh
-cargo test           # 167 tests
+cargo test           # 186 tests (unit + E2E integration)
 cargo clippy         # 0 warnings enforced
 cargo build --release
 ```

@@ -317,6 +317,24 @@ impl HeadTailBuffer {
         self.total_lines
     }
 
+    /// Shrink the head budget and apply it RETROACTIVELY: any already-buffered
+    /// head lines beyond `new_head_cap` are moved to the front of the tail (in
+    /// order), so a mid-stream re-split (e.g. on a detected panic, where the
+    /// useful context is at the bottom) actually reshapes what is rendered
+    /// instead of only affecting future lines. Bounded by the tail capacity.
+    pub fn rebalance_head(&mut self, new_head_cap: usize) {
+        if self.head.len() > new_head_cap {
+            let excess = self.head.split_off(new_head_cap);
+            for line in excess.into_iter().rev() {
+                self.tail.push_front(line);
+            }
+            while self.tail_cap > 0 && self.tail.len() > self.tail_cap {
+                self.tail.pop_front();
+            }
+        }
+        self.head_cap = new_head_cap;
+    }
+
     /// How many lines are dropped from the final rendered output, given the
     /// `threshold` gate and how many tail lines we intend to *display*.
     ///
@@ -438,23 +456,22 @@ impl FilterPipeline {
         }
 
         // --- 80/20 Auto-Tuning Ecosystem Heuristics ---
+        // When a crash signature appears, reshape the head/tail split retroactively.
+        // The tail is already sized to retain a large error window (see runner),
+        // so we only need to decide how much HEAD to keep.
         if !self.auto_tuned {
-            let total = self.buffer.head_cap + self.buffer.tail_cap;
-            if total > 0 {
-                // Python/Rust: errors are at the bottom -> 10% head, 90% tail
-                if line_lower.contains("traceback (most recent call last)")
-                    || line_lower.contains("panicked at")
-                {
-                    self.buffer.head_cap = (total as f32 * 0.1) as usize;
-                    self.buffer.tail_cap = total - self.buffer.head_cap;
-                    self.auto_tuned = true;
-                }
-                // Java: exceptions are at the top, caused by at bottom -> 50/50
-                else if line_lower.contains("exception in thread") {
-                    self.buffer.head_cap = (total as f32 * 0.5) as usize;
-                    self.buffer.tail_cap = total - self.buffer.head_cap;
-                    self.auto_tuned = true;
-                }
+            if line_lower.contains("traceback (most recent call last)")
+                || line_lower.contains("panicked at")
+            {
+                // Python/Rust: the useful context (the actual error) is at the bottom.
+                // Keep far fewer head lines and let the tail carry the trace.
+                let new_head = (self.buffer.head_cap / 5).max(3); // ~20%, floor 3
+                self.buffer.rebalance_head(new_head);
+                self.auto_tuned = true;
+            } else if line_lower.contains("exception in thread") {
+                // Java: the exception header is at the TOP; the existing head already
+                // captures it. Nothing to rebalance — just stop re-checking.
+                self.auto_tuned = true;
             }
         }
 
@@ -1022,6 +1039,39 @@ mod tests {
         assert!(output2.contains("line 150"));
         assert!(output2.contains("line 199"));
         assert!(!output2.contains("line 149"));
+    }
+
+    #[test]
+    fn buffer_rebalance_head_preserves_order() {
+        let mut buf = HeadTailBuffer::new(10, 100);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+        buf.rebalance_head(3); // keep 3 head lines, move the other 7 to the tail front
+        let (output, lines, _) = buf.render(1000, 100); // below threshold → show all
+        let expected: Vec<String> = (0..10).map(|i| format!("line {}", i)).collect();
+        assert_eq!(output, expected.join("\n"));
+        assert_eq!(lines, 10);
+    }
+
+    #[test]
+    fn pipeline_panic_shrinks_head_retroactively() {
+        // Use tokens that neither prefix- nor fuzzy-collapse (distinct first words,
+        // <10 alphabetic chars) so each line reaches the buffer individually.
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        for i in 0..40 {
+            pipe.feed(format!("E{}", i).into());
+        }
+        pipe.feed("thread 'main' panicked at src/x.rs:1:1".into());
+        for i in 0..5 {
+            pipe.feed(format!("TR{}", i).into());
+        }
+        let result = pipe.finish(10, 0, 30); // threshold 10 forces truncation
+                                             // The crash context (panic + trailing trace) must survive...
+        assert!(result.output.contains("panicked at"));
+        assert!(result.output.contains("TR4"));
+        // ...while the head is shrunk, so an early-middle line is dropped.
+        assert!(!result.output.contains("E10"));
     }
 
     #[test]

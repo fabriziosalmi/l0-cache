@@ -9,7 +9,7 @@ codes have special meaning.
 |---|---|
 | 0 | Child exited successfully |
 | 1-125 | Child exited with error (code passed through) |
-| 126 | Child command found but not executable |
+| 126 | Child found but not executable, **or blocked by the [Safety Guard](./#safety-guard)** |
 | 127 | Child command not found, or `/bin/sh` not found |
 
 ## Signal Exit Codes (POSIX Convention)
@@ -35,13 +35,15 @@ as `128 + signal_number`. This follows the POSIX/bash convention.
 
 ## Behavior on Signals
 
-When the user sends Ctrl-C (SIGINT):
+The captured child runs in its **own process group**. When `l0-cache` receives
+SIGINT (Ctrl-C) or SIGTERM (`kill`, `timeout`, systemd, `docker stop`):
 
-1. SIGINT is delivered to the entire process group by the terminal.
-2. `l0-cache` ignores SIGINT (handler installed at startup).
-3. The child process receives SIGINT and handles it (typically exits).
-4. `l0-cache` calls `child.wait()`, collects the exit status.
-5. `l0-cache` reports exit code 130 (128 + SIGINT).
+1. `l0-cache`'s signal handler **forwards** the signal to the child's process
+   group, so the whole child subtree (pipelines, grandchildren) receives it.
+2. The child handles the signal (typically exits); its stdout pipe closes.
+3. `l0-cache` finishes reading, calls `child.wait()`, and collects the status.
+4. `l0-cache` reports `128 + signal_number` (e.g. 130 for SIGINT, 143 for SIGTERM).
 
-This ensures `l0-cache` always completes its cleanup (metrics logging) before
-exiting.
+This both lets the child terminate cleanly **and** ensures `l0-cache` always
+completes its own cleanup (metrics logging) before exiting. SIGPIPE is ignored so
+that `l0-cache cmd | head` can log metrics before exiting 141.

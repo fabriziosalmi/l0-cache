@@ -290,6 +290,14 @@ perform_install() {
         else
             log_warn "Unknown shell or configuration file. Please manually verify that $target_dir is in your \$PATH."
         fi
+    else
+        # Global install: verify the destination is actually reachable on $PATH.
+        if echo ":$PATH:" | grep -q ":$target_dir:"; then
+            log_info "$target_dir is on your \$PATH."
+        else
+            log_warn "$target_dir is not on your \$PATH — 'l0-cache' may not be found."
+            log_warn "Add it to your shell profile, e.g.: export PATH=\"\$PATH:$target_dir\""
+        fi
     fi
 
     # 4. Completions setup
@@ -476,10 +484,22 @@ if ! is_in_repo; then
     fi
     
     TEMP_DIR=$(mktemp -d -t l0-cache-install-XXXXXXXX)
-    git clone --depth 1 https://github.com/fabriziosalmi/l0-cache.git "$TEMP_DIR"
-    
+    git clone --quiet https://github.com/fabriziosalmi/l0-cache.git "$TEMP_DIR"
+
     # Run the installer from the cloned repo
     cd "$TEMP_DIR"
+
+    # Pin to the latest RELEASE TAG rather than building whatever is at the tip of
+    # the default branch. Reduces the blast radius of a compromised/forced-push
+    # repo: an unattended `curl | bash` builds a released revision, not arbitrary
+    # HEAD. (There are no signed binaries yet — see SECURITY.md.)
+    LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+    if [ -n "$LATEST_TAG" ]; then
+        log_info "Pinning to latest release tag: ${BOLD}$LATEST_TAG${NC}"
+        git checkout --quiet "$LATEST_TAG"
+    else
+        log_warn "No release tag found; building from the default-branch tip."
+    fi
     # Pass all original arguments to the sub-installer.
     # NOTE: "${ARGS[@]+"${ARGS[@]}"}" expands to ZERO words when ARGS is empty.
     # The older "${ARGS[@]:-}" form injected a single empty-string argument, which
@@ -535,7 +555,9 @@ done
 
 # If stdin is not a terminal (e.g. piped via curl | bash), run local install automatically
 if [ ! -t 0 ]; then
-    log_info "Piped execution detected (non-interactive). Proceeding with Local Install..."
+    log_info "Piped execution detected (non-interactive)."
+    log_warn "This will clone l0-cache, compile it with cargo, and install to $LOCAL_BIN_DIR."
+    log_warn "Review the script first if you do not trust the source. Proceeding with Local Install..."
     perform_install "$LOCAL_BIN_DIR" false
     exit 0
 fi

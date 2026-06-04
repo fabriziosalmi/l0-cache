@@ -172,14 +172,81 @@ impl Args {
         None
     }
 
-    /// Returns the command arguments as a single string (for metrics).
+    /// Returns the command arguments as a single string (for metrics), with
+    /// obvious secrets redacted so they are not persisted to `metrics.jsonl`.
     pub fn cmd_args_string(&self) -> String {
         if self.command.len() > 1 {
-            self.command[1..].join(" ")
+            redact_secret_args(&self.command[1..])
         } else {
             String::new()
         }
     }
+}
+
+/// Flag names (with leading dashes stripped) whose value is a credential.
+fn is_secret_flag_name(flag: &str) -> bool {
+    let f = flag.trim_start_matches('-').to_lowercase();
+    matches!(
+        f.as_str(),
+        "password"
+            | "passwd"
+            | "token"
+            | "secret"
+            | "api-key"
+            | "apikey"
+            | "api_key"
+            | "access-token"
+            | "auth"
+            | "credential"
+            | "credentials"
+            | "private-key"
+            | "secret-key"
+            | "bearer"
+    )
+}
+
+/// Redact `user:pass` userinfo from a URL argument: `scheme://u:p@host` → `scheme://***@host`.
+fn redact_url_userinfo(arg: &str) -> String {
+    if let Some(scheme_end) = arg.find("://") {
+        let after = &arg[scheme_end + 3..];
+        if let Some(at) = after.find('@') {
+            if after[..at].contains(':') {
+                return format!("{}://***@{}", &arg[..scheme_end], &after[at + 1..]);
+            }
+        }
+    }
+    arg.to_string()
+}
+
+/// Join command arguments into a metrics string, redacting credential-bearing
+/// values: `--password X` / `--password=X`, `-H/--header` values, and URL
+/// userinfo. Benign flags (`mkdir -p`, `sort -u`, …) are left untouched.
+fn redact_secret_args(args: &[String]) -> String {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            out.push("***".to_string());
+            redact_next = false;
+            continue;
+        }
+        // `--flag=value` form.
+        if let Some(eq) = arg.find('=') {
+            let name = &arg[..eq];
+            if is_secret_flag_name(name) {
+                out.push(format!("{}=***", name));
+                continue;
+            }
+        }
+        // Bare secret flag, or a header flag: redact the following token.
+        if is_secret_flag_name(arg) || arg == "-H" || arg == "--header" {
+            out.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+        out.push(redact_url_userinfo(arg));
+    }
+    out.join(" ")
 }
 
 #[cfg(test)]
@@ -325,6 +392,25 @@ mod tests {
     fn cmd_args_string_no_args() {
         let args = Args::parse_from(["t", "ls"]);
         assert_eq!(args.cmd_args_string(), "");
+    }
+
+    #[test]
+    fn cmd_args_string_redacts_secrets() {
+        // --flag=value and --flag value forms of credential flags.
+        let a = Args::parse_from(["t", "mysql", "--password=hunter2", "db"]);
+        assert_eq!(a.cmd_args_string(), "--password=*** db");
+        let b = Args::parse_from(["t", "tool", "--token", "abc123", "go"]);
+        assert_eq!(b.cmd_args_string(), "--token *** go");
+        // Authorization headers and URL userinfo.
+        let c = Args::parse_from(["t", "curl", "-H", "Authorization: Bearer XYZ", "u"]);
+        assert_eq!(c.cmd_args_string(), "-H *** u");
+        let d = Args::parse_from(["t", "git", "clone", "https://user:pw@example.com/r.git"]);
+        assert_eq!(d.cmd_args_string(), "clone https://***@example.com/r.git");
+        // Benign overloaded short flags are NOT redacted.
+        let e = Args::parse_from(["t", "mkdir", "-p", "a/b/c"]);
+        assert_eq!(e.cmd_args_string(), "-p a/b/c");
+        let f = Args::parse_from(["t", "sort", "-u", "file.txt"]);
+        assert_eq!(f.cmd_args_string(), "-u file.txt");
     }
 
     #[test]

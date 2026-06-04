@@ -11,11 +11,19 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::filter::{self, FilterPipeline, FilterResult};
+
+/// Process-group id of the currently running captured child (0 when none).
+///
+/// The captured child is spawned into its OWN process group, and the parent's
+/// SIGINT/SIGTERM handlers forward to this group (see `main::forward_signal`) so
+/// the whole child subtree — not just the `sh` wrapper — receives the signal.
+/// The idle-timeout watchdog kills the same group.
+pub static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 
 /// Result of running a command through the proxy.
 pub struct RunResult {
@@ -47,12 +55,23 @@ fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::proces
         .collect::<Vec<_>>()
         .join(" ");
 
-    let child_res = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(format!("{} 2>&1", shell_cmd))
         .stdout(Stdio::piped())
-        .stderr(Stdio::null()) // stderr is already merged into stdout
-        .spawn();
+        .stderr(Stdio::null()); // stderr is already merged into stdout
+
+    // Put the child in its own process group so the parent can deliver SIGINT/
+    // SIGTERM (and the watchdog SIGKILL) to the WHOLE subtree via killpg, rather
+    // than only the `sh` wrapper. pgid becomes the child pid.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let child_res = command.spawn();
 
     let mut child = match child_res {
         Ok(c) => c,
@@ -217,6 +236,10 @@ pub fn run_captured(
 
     let (mut child, mut reader) = spawn_merged(cmd)?;
 
+    // Publish the child's process-group id so the parent's signal handlers and
+    // the watchdog can target the whole subtree. pgid == pid (own group).
+    CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
+
     // Reusable line buffer for read_line_bytes
     let mut line_buf: Vec<u8> = Vec::with_capacity(4096);
 
@@ -261,10 +284,19 @@ pub fn run_captured(
                 let elapsed = start.elapsed().as_millis() as u64;
                 let last = last_output_time_clone.load(Ordering::Relaxed);
                 if elapsed.saturating_sub(last) > timeout_ms {
-                    let _ = std::process::Command::new("kill")
-                        .arg("-9")
-                        .arg(child_id.to_string())
-                        .status();
+                    // Kill the whole child process group, not just the `sh` wrapper,
+                    // so pipelines/grandchildren can't keep the stdout pipe open and
+                    // deadlock the read loop.
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(child_id as i32), libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/T", "/PID", &child_id.to_string()])
+                            .status();
+                    }
                     return true;
                 }
             }
@@ -329,6 +361,8 @@ pub fn run_captured(
 
     // Wait for child to finish
     let status: ExitStatus = child.wait()?;
+    // Child reaped: stop forwarding signals to a defunct group.
+    CHILD_PGID.store(0, Ordering::SeqCst);
     let exit_code = exit_code_from_status(status);
     let duration_ms = start.elapsed().as_millis() as u64;
 

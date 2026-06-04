@@ -296,17 +296,17 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
                     // not the rotated-away copy — otherwise `print_stats` and
                     // `get_adaptive_params` would see an empty file after every
                     // rotation. The new metric is then appended below.
-                    if let Ok(mut file) = OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&path)
-                    {
+                    let rotate_open = {
+                        let mut opts = OpenOptions::new();
+                        opts.create(true).write(true).truncate(true);
                         #[cfg(unix)]
                         {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+                            use std::os::unix::fs::OpenOptionsExt;
+                            opts.mode(0o600);
                         }
+                        opts.open(&path)
+                    };
+                    if let Ok(mut file) = rotate_open {
                         for line in kept_lines {
                             let _ = writeln!(file, "{}", line);
                         }
@@ -330,10 +330,21 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
     };
     line.push('\n');
 
-    // Append atomically (O_APPEND)
-    match OpenOptions::new().create(true).append(true).open(&path) {
+    // Append atomically (O_APPEND). Create new files 0600 via the open mode so
+    // there is no window where the file is world-readable before a chmod.
+    let open_result = {
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&path)
+    };
+    match open_result {
         Ok(mut file) => {
-            // Set restrictive permissions on Unix (0600 = owner read/write only)
+            // Fix up a pre-existing file's perms (open mode only applies on create).
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -370,9 +381,9 @@ fn parse_since(s: &str) -> Option<u64> {
     let num_str = chars.as_str();
     let num: u64 = num_str.parse().ok()?;
     match unit {
-        'd' => Some(num * 86400),
-        'h' => Some(num * 3600),
-        'm' => Some(num * 60),
+        'd' => Some(num.saturating_mul(86400)),
+        'h' => Some(num.saturating_mul(3600)),
+        'm' => Some(num.saturating_mul(60)),
         's' => Some(num),
         _ => None,
     }
@@ -439,12 +450,12 @@ pub fn print_stats(since: Option<&str>) {
             Err(_) => continue, // skip malformed lines
         };
 
-        // Apply time filter
+        // Apply time filter (fail-closed: a missing/unparseable timestamp is
+        // excluded from a windowed query rather than silently counted).
         if let Some(cutoff_time) = cutoff {
-            if let Some(ts_secs) = parse_rfc3339_to_secs(&metric.ts) {
-                if ts_secs < cutoff_time {
-                    continue;
-                }
+            match parse_rfc3339_to_secs(&metric.ts) {
+                Some(ts_secs) if ts_secs >= cutoff_time => {}
+                _ => continue,
             }
         }
 
@@ -740,14 +751,17 @@ pub fn run_doctor() {
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let mode = meta.permissions().mode();
-                    let owner_read_write = (mode & 0o777) == 0o600;
-                    if owner_read_write {
+                    // Secure as long as no group/other access (0400, 0440-as-owner,
+                    // 0600 all qualify); only group/world bits are a concern.
+                    let no_group_or_world = (mode & 0o077) == 0;
+                    if no_group_or_world {
                         println!(
-                            "  \x1b[32m✔ [OK]\x1b[0m Metrics file exists with secure permissions (0600)."
+                            "  \x1b[32m✔ [OK]\x1b[0m Metrics file exists with secure permissions ({:03o}, no group/world access).",
+                            mode & 0o777
                         );
                         ok_count += 1;
                     } else {
-                        println!("  \x1b[33m⚠ [WARN]\x1b[0m Metrics file permissions are insecure: {:o} (expected 0600).", mode & 0o777);
+                        println!("  \x1b[33m⚠ [WARN]\x1b[0m Metrics file permissions are insecure: {:o} (group/world access; expected 0600).", mode & 0o777);
                         println!(
                             "     To secure it, run: chmod 600 {}",
                             metrics_file.display()

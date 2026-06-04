@@ -10,7 +10,7 @@ One JSON object per line (JSONL). Each line represents one `l0-cache` invocation
 
 ```json
 {
-  "ts": "2024-01-15T10:30:00.123Z",
+  "ts": "2024-01-15T10:30:00Z",
   "cmd": "cargo",
   "args": "test --all",
   "bytes_raw": 15000,
@@ -32,7 +32,7 @@ One JSON object per line (JSONL). Each line represents one `l0-cache` invocation
 
 | Field | Type | Description |
 |---|---|---|
-| `ts` | string | ISO 8601 timestamp (UTC) |
+| `ts` | string | RFC 3339 / ISO 8601 UTC timestamp, second resolution (`YYYY-MM-DDTHH:MM:SSZ`) |
 | `cmd` | string | Command binary name (basename only) |
 | `args` | string | Command arguments joined by space |
 | `bytes_raw` | integer | Total bytes of raw output |

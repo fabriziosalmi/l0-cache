@@ -225,17 +225,37 @@ fn write_output(output: &str) -> std::io::Result<()> {
     handle.flush()
 }
 
+/// Async-signal-safe handler: forward the received signal to the captured
+/// child's process group, so the whole subtree terminates. Only loads an atomic
+/// and calls `kill`, both of which are async-signal-safe.
+///
+/// Because the captured child runs in its OWN process group, the controlling
+/// terminal no longer delivers SIGINT directly to it — the parent must forward.
+/// This also fixes a directed `kill <l0-cache-pid>` (SIGTERM), which the old
+/// `SIG_IGN` swallowed while the child kept running and `child.wait()` blocked.
+#[cfg(unix)]
+extern "C" fn forward_signal(sig: libc::c_int) {
+    let pgid = runner::CHILD_PGID.load(std::sync::atomic::Ordering::SeqCst);
+    if pgid > 0 {
+        // Negative pid → signal the process group (killpg).
+        unsafe {
+            libc::kill(-pgid, sig);
+        }
+    }
+    // If no child is running (pgid == 0) we deliberately no-op: l0-cache itself
+    // is mid-spawn or finishing up and should not be torn down here.
+}
+
 /// Install signal handlers for clean proxy behavior.
 ///
-/// - SIGINT (Ctrl-C): Ignored in `l0-cache`. The child process receives it from
-///   the terminal (same process group). We wait for the child to finish.
-/// - SIGTERM: Same treatment — ignore in parent, let child handle it.
+/// - SIGINT (Ctrl-C) / SIGTERM: forwarded to the child's process group (above).
 /// - SIGPIPE: Ignored so we can handle BrokenPipe in code and still log metrics.
 #[cfg(unix)]
 fn install_signal_handlers() {
+    let handler = forward_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
     unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_IGN);
-        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 }

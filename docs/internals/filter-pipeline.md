@@ -100,8 +100,11 @@ is discarded and replaced with a banner:
 ... [370 lines omitted for LLM] ...
 ```
 
-On non-zero exit, the tail buffer is expanded to 120 lines (configurable)
-before rendering, to ensure error messages and stack traces are preserved.
+The buffer retains `max(--tail, --tail-error)` lines while streaming (the tail
+cannot be expanded retroactively once lines have been evicted). At render time,
+on a **non-zero exit** the larger error tail (120 lines, configurable) is shown
+so error messages and stack traces are preserved; on success the smaller tail
+(30 lines) is shown.
 
 ### Memory Layout
 
@@ -121,7 +124,14 @@ command produces 100 lines or 10 million.
 
 ## Binary Detection
 
-Before the pipeline processes any lines, the first 8 KB of output are
-checked for null bytes. If null bytes are found, the output is classified
-as binary and passed through without filtering (with a lossy UTF-8
-conversion for display).
+The first ~8 KB of output are checked for null bytes **or** invalid UTF-8. If
+either is found, the output is classified as binary. Rather than forward a
+useless, token-expensive blob, `l0-cache` emits the sniffed first ~8 KB (lossy
+UTF-8) and, when the stream was larger, an explicit banner:
+
+```
+... [l0-cache: binary output detected — showing first 8192 of 1048576 bytes] ...
+```
+
+The metric records `strategy: "binary_skip"` and `truncated: true` when bytes
+were dropped, so binary output is never silently presented as if complete.
