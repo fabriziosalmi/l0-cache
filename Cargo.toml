@@ -2,6 +2,7 @@
 name = "l0-cache"
 version = "0.1.2"
 edition = "2021"
+rust-version = "1.85"
 description = "Lightweight CLI proxy that reduces LLM token consumption via universal output filtering"
 license = "MIT"
 keywords = ["cli", "proxy", "llm", "token", "filter"]

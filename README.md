@@ -1,5 +1,10 @@
 # l0-cache
 
+[![CI](https://github.com/fabriziosalmi/l0-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/fabriziosalmi/l0-cache/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/fabriziosalmi/l0-cache?sort=semver&color=blue)](https://github.com/fabriziosalmi/l0-cache/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](Cargo.toml)
+
 A lightweight CLI proxy written in Rust that reduces LLM token consumption by
 filtering, truncating, and compressing command output. Designed for AI coding
 assistants (Claude Code, Gemini CLI, Cursor) running on macOS, Linux, and
