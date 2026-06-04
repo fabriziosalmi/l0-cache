@@ -56,3 +56,25 @@ jobs:
         uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  installer:
+    name: Installer Script Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Syntax & lint (bash -n + shellcheck)
+        run: |
+          bash -n install.sh
+          shellcheck install.sh || true   # advisory; do not fail the build on style
+
+      - name: Regression — empty ARGS must expand to ZERO words (curl | bash no-op bug)
+        run: |
+          set -u
+          ARGS=()
+          set -- "${ARGS[@]+"${ARGS[@]}"}"
+          test "$#" -eq 0 || { echo "empty-array expansion injected $# arg(s)"; exit 1; }
+
+      - name: Smoke — dry-run install path parses & runs
+        run: bash install.sh --dry-run

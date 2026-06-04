@@ -274,11 +274,33 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
                         }
                     }
 
+                    // Size cap: if age-pruning alone still leaves the file above the
+                    // rotation target (e.g. a heavy user generating >10 MB within 30
+                    // days), keep only the most-recent lines that fit in half the max.
+                    // Without this, an all-recent oversized file would re-rotate (and
+                    // rewrite itself in full) on EVERY subsequent invocation.
+                    let target = (METRICS_MAX_BYTES / 2) as usize;
+                    let mut start = kept_lines.len();
+                    let mut budget = target;
+                    for i in (0..kept_lines.len()).rev() {
+                        let needed = kept_lines[i].len() + 1; // line + '\n'
+                        if needed > budget {
+                            break;
+                        }
+                        budget -= needed;
+                        start = i;
+                    }
+                    let kept_lines = &kept_lines[start..];
+
+                    // Write the pruned history back into the ACTIVE file (`path`),
+                    // not the rotated-away copy — otherwise `print_stats` and
+                    // `get_adaptive_params` would see an empty file after every
+                    // rotation. The new metric is then appended below.
                     if let Ok(mut file) = OpenOptions::new()
                         .create(true)
                         .write(true)
                         .truncate(true)
-                        .open(&old)
+                        .open(&path)
                     {
                         #[cfg(unix)]
                         {
@@ -288,6 +310,8 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
                         for line in kept_lines {
                             let _ = writeln!(file, "{}", line);
                         }
+                        // History preserved in `path`; discard the rotated copy.
+                        let _ = fs::remove_file(&old);
                     }
                 }
             }
@@ -514,8 +538,10 @@ pub fn print_stats(since: Option<&str>) {
             "·".repeat(empty)
         );
 
-        let cmd_disp = if cmd.len() > 23 {
-            format!("{}…", &cmd[..22])
+        // Char-boundary safe: the metrics file is externally writable, so a
+        // command name whose 22nd byte falls mid-codepoint must not panic.
+        let cmd_disp = if cmd.chars().count() > 23 {
+            format!("{}…", cmd.chars().take(22).collect::<String>())
         } else {
             cmd.to_string()
         };
@@ -813,19 +839,7 @@ pub fn run_doctor() {
 
     // 5. Safety Command Guard Check
     println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m5. Safety Command Guard Status\x1b[0m");
-    let guard_active = if std::env::var("L0_CACHE_GUARD")
-        .map(|v| v == "0")
-        .unwrap_or(false)
-    {
-        false
-    } else if std::env::var("L0_CACHE_GUARD")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        true
-    } else {
-        is_llm_environment()
-    };
+    let guard_active = guard_enabled(false, false);
     if guard_active {
         println!("  \x1b[32m● [ACTIVE]\x1b[0m Safety Guard is active. Destructive/exfiltrating commands will be blocked.");
         ok_count += 1;
@@ -1261,12 +1275,88 @@ pub fn is_llm_environment() -> bool {
     false
 }
 
-/// Evaluates a command name and arguments against dangerous pattern rules (system destruction, reverse shell, exfiltration).
-pub fn check_dangerous_command(cmd_name: &str, command: &[String]) -> Result<(), String> {
-    let cmd_lower = cmd_name.to_lowercase();
+/// Parse a boolean-ish environment value, e.g. for `L0_CACHE_GUARD`.
+/// Returns `Some(true/false)` for recognized truthy/falsy values, `None` otherwise.
+fn parse_bool_env(val: &str) -> Option<bool> {
+    match val.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" | "" => Some(false),
+        _ => None,
+    }
+}
 
-    // Convert all arguments to a single lowercase string for scanning
-    let full_args: Vec<String> = command.iter().map(|s| s.to_lowercase()).collect();
+/// Single source of truth for whether the safety guard is active.
+///
+/// Precedence: `--no-guard` → `--guard` → `L0_CACHE_GUARD` (truthy/falsy) →
+/// LLM-environment auto-detect. Both the enforcement path (`main`) and the
+/// `--doctor` report call this, so they can never disagree (the previous code
+/// treated `L0_CACHE_GUARD=true` as "off" in enforcement but "on" in doctor).
+pub fn guard_enabled(force_on: bool, force_off: bool) -> bool {
+    if force_off {
+        return false;
+    }
+    if force_on {
+        return true;
+    }
+    if let Ok(val) = std::env::var("L0_CACHE_GUARD") {
+        if let Some(b) = parse_bool_env(&val) {
+            return b;
+        }
+    }
+    is_llm_environment()
+}
+
+/// Critical filesystem roots that must never be the target of a recursive force-remove.
+const CRITICAL_ROOTS: &[&str] = &[
+    "/", "/etc", "/var", "/usr", "/boot", "/dev", "/sys", "/proc", "/lib", "/lib64", "/bin",
+    "/sbin", "/root",
+];
+
+/// Normalize a path-like argument so guard comparisons survive cosmetic variation:
+/// strip surrounding quotes, collapse repeated slashes, resolve trailing `/.`,
+/// and drop trailing slashes (keeping the root `/`). Does NOT resolve `..` (we err
+/// toward blocking, and a `..` that climbs to a root is caught by the literal root).
+fn normalize_guard_path(arg: &str) -> String {
+    let s = arg.trim().trim_matches(|c| c == '\'' || c == '"');
+    let mut out = String::with_capacity(s.len());
+    let mut prev_slash = false;
+    for ch in s.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                out.push('/');
+            }
+            prev_slash = true;
+        } else {
+            out.push(ch);
+            prev_slash = false;
+        }
+    }
+    while out.ends_with("/.") {
+        out.truncate(out.len() - 2);
+    }
+    while out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
+}
+
+/// True if a (possibly glob/normalized) argument targets a protected root, e.g.
+/// `/etc`, `/etc/`, `/etc//`, `/etc/.`, `/etc/*`, `/`, `/*`.
+fn is_critical_target(arg: &str) -> bool {
+    let n = normalize_guard_path(arg);
+    let base = match n.strip_suffix("/*") {
+        Some("") => "/",
+        Some(rest) => rest,
+        None => n.as_str(),
+    };
+    CRITICAL_ROOTS.contains(&base)
+}
+
+/// Run the dangerous-pattern rules against a single command segment
+/// (`cmd_name` = the segment's binary basename, `tokens` = its whitespace argv).
+fn scan_segment(cmd_name: &str, tokens: &[String]) -> Result<(), String> {
+    let cmd_lower = cmd_name.to_lowercase();
+    let full_args: Vec<String> = tokens.iter().map(|s| s.to_lowercase()).collect();
     let full_command_str = full_args.join(" ");
 
     // 1. Destructive rm check
@@ -1280,19 +1370,11 @@ pub fn check_dangerous_command(cmd_name: &str, command: &[String]) -> Result<(),
             || full_args.contains(&"--force".to_string());
 
         if has_recursive && has_force {
-            // Check for critical system paths
-            let critical_paths = [
-                "/", "/*", "/etc", "/etc/*", "/var", "/var/*", "/usr", "/usr/*", "/boot",
-                "/boot/*", "/dev", "/dev/*", "/sys", "/sys/*", "/proc", "/proc/*", "/lib",
-                "/lib/*", "/lib64", "/lib64/*", "/bin", "/bin/*", "/sbin", "/sbin/*",
-            ];
-            for path in &critical_paths {
-                if full_args.iter().any(|arg| arg == path) {
-                    return Err(format!(
-                        "Destructive system-level removal detected: 'rm' recursively targeted critical path '{}'",
-                        path
-                    ));
-                }
+            if let Some(target) = full_args.iter().find(|arg| is_critical_target(arg)) {
+                return Err(format!(
+                    "Destructive system-level removal detected: 'rm' recursively targeted critical path '{}'",
+                    target
+                ));
             }
         }
     }
@@ -1359,6 +1441,47 @@ pub fn check_dangerous_command(cmd_name: &str, command: &[String]) -> Result<(),
             "Destructive SQL command blocked: database drop query detected in '{}'",
             cmd_name
         ));
+    }
+
+    Ok(())
+}
+
+/// If `command` is a shell wrapper (`sh`/`bash`/… `-c <payload>`), return the payload string.
+fn shell_c_payload(command: &[String]) -> Option<&str> {
+    let bin = command.first()?;
+    let base = bin.rsplit('/').next().unwrap_or(bin);
+    const SHELLS: &[&str] = &["sh", "bash", "zsh", "ksh", "csh", "tcsh", "fish", "dash"];
+    if !SHELLS.contains(&base) {
+        return None;
+    }
+    let idx = command.iter().position(|a| a == "-c")?;
+    command.get(idx + 1).map(|s| s.as_str())
+}
+
+/// Evaluates a command name and arguments against dangerous pattern rules
+/// (system destruction, reverse shell, exfiltration, SQL drops).
+///
+/// Beyond the literal argv, this also unwraps shell wrappers: for
+/// `bash -c "echo hi && rm -rf /etc/"` the `-c` payload is split into command
+/// segments and each is re-scanned, so destructive commands hidden inside the
+/// dominant LLM-agent invocation pattern (`sh -c "…"`) are not bypassed.
+///
+/// This is a best-effort lint, not a sandbox: it does not parse the shell grammar
+/// (quoting, command substitution, variable expansion) and can be bypassed by a
+/// determined caller. Bypass intentionally with `--no-guard` / `L0_CACHE_GUARD=0`.
+pub fn check_dangerous_command(cmd_name: &str, command: &[String]) -> Result<(), String> {
+    // Literal argv scan (preserves prior behavior).
+    scan_segment(cmd_name, command)?;
+
+    // Shell-wrapper scan: re-scan each segment of the `-c` payload.
+    if let Some(payload) = shell_c_payload(command) {
+        for seg in payload.split([';', '&', '|', '\n']) {
+            let toks: Vec<String> = seg.split_whitespace().map(|s| s.to_string()).collect();
+            if let Some(first) = toks.first() {
+                let seg_cmd = first.rsplit('/').next().unwrap_or(first).to_string();
+                scan_segment(&seg_cmd, &toks)?;
+            }
+        }
     }
 
     Ok(())
@@ -2096,5 +2219,86 @@ mod tests {
             "SELECT * FROM users;".to_string(),
         ];
         assert!(check_dangerous_command("sqlite3", &command_safe).is_ok());
+    }
+
+    #[test]
+    fn test_guard_rm_path_normalization() {
+        // Trailing slash, doubled slash, and trailing "/." must all be caught.
+        for path in ["/etc/", "/etc//", "/etc/.", "/", "/*", "/etc/*", "'/etc/'"] {
+            let cmd = vec!["rm".to_string(), "-rf".to_string(), path.to_string()];
+            assert!(
+                check_dangerous_command("rm", &cmd).is_err(),
+                "rm -rf {path} should be blocked"
+            );
+        }
+        // Benign relative targets must NOT be blocked.
+        for path in ["target", "./target/", "build/", "/home/user/project"] {
+            let cmd = vec!["rm".to_string(), "-rf".to_string(), path.to_string()];
+            assert!(
+                check_dangerous_command("rm", &cmd).is_ok(),
+                "rm -rf {path} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_guard_shell_wrapped_rm() {
+        // The dominant LLM-agent pattern: `bash -c "rm -rf /etc"` must be blocked
+        // even though the outer argv is just [bash, -c, "<payload>"].
+        let cmd = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "rm -rf /etc".to_string(),
+        ];
+        assert!(check_dangerous_command("rm", &cmd).is_err());
+
+        // Chained inside the payload, with a trailing slash.
+        let cmd2 = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo hi && rm -rf /etc/".to_string(),
+        ];
+        assert!(check_dangerous_command("echo", &cmd2).is_err());
+
+        // A benign shell payload must still pass.
+        let safe = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "cargo build && rm -rf target".to_string(),
+        ];
+        assert!(check_dangerous_command("cargo", &safe).is_ok());
+    }
+
+    #[test]
+    fn test_parse_bool_env() {
+        for v in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert_eq!(parse_bool_env(v), Some(true), "{v:?} should be truthy");
+        }
+        for v in ["0", "false", "no", "off", ""] {
+            assert_eq!(parse_bool_env(v), Some(false), "{v:?} should be falsy");
+        }
+        assert_eq!(parse_bool_env("banana"), None);
+    }
+
+    #[test]
+    fn test_guard_enabled_flags() {
+        // Explicit flags take precedence over everything (and over each other:
+        // force_off wins), without consulting the environment.
+        assert!(!guard_enabled(false, true)); // --no-guard
+        assert!(guard_enabled(true, false)); // --guard
+        assert!(!guard_enabled(true, true)); // both → off wins
+    }
+
+    #[test]
+    fn test_normalize_guard_path() {
+        assert_eq!(normalize_guard_path("/etc/"), "/etc");
+        assert_eq!(normalize_guard_path("/etc//"), "/etc");
+        assert_eq!(normalize_guard_path("/etc/."), "/etc");
+        assert_eq!(normalize_guard_path("//etc"), "/etc");
+        assert_eq!(normalize_guard_path("'/etc'"), "/etc");
+        assert_eq!(normalize_guard_path("/"), "/");
+        assert!(is_critical_target("/etc/*"));
+        assert!(is_critical_target("/*"));
+        assert!(!is_critical_target("target/"));
     }
 }

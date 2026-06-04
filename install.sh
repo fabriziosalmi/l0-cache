@@ -480,8 +480,12 @@ if ! is_in_repo; then
     
     # Run the installer from the cloned repo
     cd "$TEMP_DIR"
-    # Pass all original arguments to the sub-installer
-    bash ./install.sh "${ARGS[@]:-}"
+    # Pass all original arguments to the sub-installer.
+    # NOTE: "${ARGS[@]+"${ARGS[@]}"}" expands to ZERO words when ARGS is empty.
+    # The older "${ARGS[@]:-}" form injected a single empty-string argument, which
+    # fell through to the unknown-argument case and printed help instead of
+    # installing — breaking the advertised `curl ... | bash` one-liner.
+    bash ./install.sh "${ARGS[@]+"${ARGS[@]}"}"
     
     # Clean up temp dir
     cd - >/dev/null

@@ -317,27 +317,38 @@ impl HeadTailBuffer {
         self.total_lines
     }
 
-    /// Was the output actually truncated?
-    /// Must consider the threshold: render() doesn't truncate below threshold.
-    pub fn was_truncated(&self, threshold: usize) -> bool {
-        self.total_lines > threshold
-            && self.total_lines > self.head_cap.saturating_add(self.tail_cap)
+    /// How many lines are dropped from the final rendered output, given the
+    /// `threshold` gate and how many tail lines we intend to *display*.
+    ///
+    /// The buffer may physically retain more tail lines than it displays (so that
+    /// the same stream can serve a small success tail or a large error tail without
+    /// a retroactive — and impossible — expansion). Below the threshold we show
+    /// everything we retained; above it we show head + `display_tail`.
+    fn omitted_count(&self, threshold: usize, display_tail: usize) -> usize {
+        let head_count = self.head.len();
+        if self.total_lines <= threshold {
+            // Small output: show everything retained. Lines are only missing if the
+            // stream exceeded what we could physically retain (head_cap + tail_cap).
+            self.total_lines
+                .saturating_sub(head_count + self.tail.len())
+        } else {
+            let shown_tail = display_tail.min(self.tail.len());
+            self.total_lines.saturating_sub(head_count + shown_tail)
+        }
     }
 
-    /// Expand the tail capacity (e.g., on error exit).
-    /// This only affects future pushes — lines already dropped are gone.
-    /// Call this BEFORE pushing if you know exit code upfront, or accept
-    /// that retroactive expansion is best-effort.
-    pub fn expand_tail(&mut self, new_tail_cap: usize) {
-        if new_tail_cap > self.tail_cap {
-            self.tail_cap = new_tail_cap;
-            // VecDeque will grow naturally on next push
-        }
+    /// Was the output actually truncated (any line omitted from what we render)?
+    pub fn was_truncated(&self, threshold: usize, display_tail: usize) -> bool {
+        self.omitted_count(threshold, display_tail) > 0
     }
 
     /// Render the final output. Returns (output_string, lines_final, bytes_final).
     /// Consumes self to avoid cloning head/tail lines.
-    pub fn render(self, threshold: usize) -> (String, usize, usize) {
+    ///
+    /// `display_tail` is how many of the retained tail lines to actually show. The
+    /// runner passes the success tail on exit 0 and the (larger) error tail on a
+    /// non-zero exit, while the buffer has retained `max(success, error)` all along.
+    pub fn render(self, threshold: usize, display_tail: usize) -> (String, usize, usize) {
         let home_path = std::env::var("HOME").ok().filter(|h| !h.is_empty());
         let process_line = |mut s: String| -> String {
             if let Some(home) = &home_path {
@@ -348,36 +359,26 @@ impl HeadTailBuffer {
             s
         };
 
-        // If below threshold, dump everything — no truncation banner
-        if self.total_lines <= threshold {
-            let all: Vec<String> = self
-                .head
-                .into_iter()
-                .chain(self.tail)
-                .map(process_line)
-                .collect();
-            let joined = all.join("\n");
-            let lines = all.len();
-            let bytes = joined.len();
-            return (joined, lines, bytes);
-        }
-
-        // Above threshold: head + banner + tail
-        let omitted = self
-            .total_lines
-            .saturating_sub(self.head.len().saturating_add(self.tail.len()));
+        let omitted = self.omitted_count(threshold, display_tail);
+        let below = self.total_lines <= threshold;
+        // Below threshold we show every retained tail line; above it we trim to the
+        // last `display_tail` lines (dropping the oldest retained tail entries).
+        let shown_tail = if below {
+            self.tail.len()
+        } else {
+            display_tail.min(self.tail.len())
+        };
+        let drop_from_tail = self.tail.len() - shown_tail;
 
         let mut parts: Vec<String> = self.head.into_iter().map(process_line).collect();
 
-        // Banner
         if omitted > 0 {
             parts.push(String::new());
             parts.push(format!("... [{} lines omitted for LLM] ...", omitted));
             parts.push(String::new());
         }
 
-        // Tail
-        parts.extend(self.tail.into_iter().map(process_line));
+        parts.extend(self.tail.into_iter().skip(drop_from_tail).map(process_line));
 
         let joined = parts.join("\n");
         let lines = parts.len();
@@ -398,6 +399,10 @@ pub struct FilterPipeline {
 }
 
 impl FilterPipeline {
+    /// `tail_cap` is the number of tail lines to *retain* while streaming. The
+    /// runner sizes this to `max(success_tail, error_tail)` so the rendered tail
+    /// can grow on a non-zero exit without an (impossible) retroactive expansion.
+    /// The actual number of tail lines shown is chosen at [`Self::finish`].
     pub fn new(head_cap: usize, tail_cap: usize, only_errors: bool) -> Self {
         Self {
             collapse: CollapseLines::new(),
@@ -463,14 +468,16 @@ impl FilterPipeline {
         }
     }
 
-    /// Expand tail capacity (call before finish if exit code != 0).
-    pub fn expand_tail(&mut self, new_tail_cap: usize) {
-        self.buffer.expand_tail(new_tail_cap);
-    }
-
     /// Finalize: flush pending collapse state, return rendered output and stats.
+    ///
     /// `raw_bytes_override`: true raw byte count from runner (pre-filter), for accurate metrics.
-    pub fn finish(mut self, threshold: usize, raw_bytes_override: usize) -> FilterResult {
+    /// `display_tail`: how many tail lines to show (success tail vs. error tail).
+    pub fn finish(
+        mut self,
+        threshold: usize,
+        raw_bytes_override: usize,
+        display_tail: usize,
+    ) -> FilterResult {
         // Flush the collapse buffer
         if let Some(last) = self.collapse.flush() {
             if let Some(squeezed) = self.squeeze.feed_owned(last) {
@@ -479,8 +486,8 @@ impl FilterPipeline {
         }
 
         let total_lines_raw = self.buffer.total_lines();
-        let truncated = self.buffer.was_truncated(threshold);
-        let (output, lines_final, bytes_final) = self.buffer.render(threshold);
+        let truncated = self.buffer.was_truncated(threshold, display_tail);
+        let (output, lines_final, bytes_final) = self.buffer.render(threshold, display_tail);
 
         FilterResult {
             output,
@@ -642,8 +649,8 @@ mod tests {
         for i in 0..8 {
             buf.push(format!("line {}", i));
         }
-        assert!(!buf.was_truncated(100));
-        let (output, lines, _) = buf.render(100);
+        assert!(!buf.was_truncated(100, 5));
+        let (output, lines, _) = buf.render(100, 5);
         assert_eq!(lines, 8);
         assert!(!output.contains("omitted"));
     }
@@ -654,8 +661,8 @@ mod tests {
         for i in 0..6 {
             buf.push(format!("line {}", i));
         }
-        assert!(!buf.was_truncated(6));
-        let (output, _, _) = buf.render(6);
+        assert!(!buf.was_truncated(6, 3));
+        let (output, _, _) = buf.render(6, 3);
         assert!(!output.contains("omitted"));
     }
 
@@ -665,10 +672,10 @@ mod tests {
         for i in 0..100 {
             buf.push(format!("line {}", i));
         }
-        assert!(buf.was_truncated(6));
+        assert!(buf.was_truncated(6, 3));
         assert_eq!(buf.total_lines(), 100);
 
-        let (output, _, _) = buf.render(6);
+        let (output, _, _) = buf.render(6, 3);
         // Should contain head lines
         assert!(output.contains("line 0"));
         assert!(output.contains("line 1"));
@@ -687,7 +694,7 @@ mod tests {
     fn buffer_one_line() {
         let mut buf = HeadTailBuffer::new(30, 30);
         buf.push("solo".into());
-        let (output, lines, _) = buf.render(100);
+        let (output, lines, _) = buf.render(100, 30);
         assert_eq!(output, "solo");
         assert_eq!(lines, 1);
     }
@@ -702,27 +709,9 @@ mod tests {
     #[test]
     fn buffer_empty() {
         let buf = HeadTailBuffer::new(30, 30);
-        let (output, lines, _) = buf.render(100);
+        let (output, lines, _) = buf.render(100, 30);
         assert_eq!(output, "");
         assert_eq!(lines, 0);
-    }
-
-    #[test]
-    fn buffer_expand_tail() {
-        let mut buf = HeadTailBuffer::new(3, 3);
-        // Push 10 lines with small tail
-        for i in 0..5 {
-            buf.push(format!("line {}", i));
-        }
-        // Now expand
-        buf.expand_tail(10);
-        for i in 5..20 {
-            buf.push(format!("line {}", i));
-        }
-        // Tail should now hold up to 10 lines
-        let (output, _, _) = buf.render(6);
-        assert!(output.contains("line 10"));
-        assert!(output.contains("line 19"));
     }
 
     // ── Full pipeline tests ─────────────────────────────────────────────
@@ -732,7 +721,7 @@ mod tests {
         let mut pipe = FilterPipeline::new(30, 30, false);
         pipe.feed("hello".into());
         pipe.feed("world".into());
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         assert_eq!(result.output, "hello\nworld");
         assert_eq!(result.lines_raw, 2);
         assert!(!result.truncated);
@@ -744,7 +733,7 @@ mod tests {
         for i in 0..200 {
             pipe.feed(format!("u{}", i).into());
         }
-        let result = pipe.finish(10, 0);
+        let result = pipe.finish(10, 0, 5);
         assert!(result.truncated);
         assert!(result.output.contains("u0"));
         assert!(result.output.contains("u199"));
@@ -761,7 +750,7 @@ mod tests {
         pipe.feed("".into());
         pipe.feed("".into());
         pipe.feed("done".into());
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         assert!(result.output.contains("warning: unused var (×3)"));
         // Should only have 1 blank line, not 3
         assert!(!result.output.contains("\n\n\n"));
@@ -926,8 +915,8 @@ mod tests {
             buf.push(format!("line {}", i));
         }
         assert_eq!(buf.total_lines(), 10);
-        let (output, lines, _) = buf.render(0); // threshold=0 forces banner path
-                                                // Head is empty, so output should only have tail lines
+        let (output, lines, _) = buf.render(0, 5); // threshold=0 forces banner path
+                                                   // Head is empty, so output should only have tail lines
         assert!(!output.contains("line 0"));
         assert!(output.contains("line 9"));
         assert!(output.contains("line 5"));
@@ -942,7 +931,7 @@ mod tests {
         }
         assert_eq!(buf.total_lines(), 10);
         // With tail_cap=0, lines beyond head are dropped entirely
-        let (output, _, _) = buf.render(0); // threshold=0 forces banner path
+        let (output, _, _) = buf.render(0, 0); // threshold=0 forces banner path
         assert!(output.contains("line 0"));
         assert!(output.contains("line 4"));
         assert!(!output.contains("line 5")); // dropped
@@ -958,7 +947,7 @@ mod tests {
             buf.push(format!("line {}", i));
         }
         assert_eq!(buf.total_lines(), 10);
-        let (output, _, _) = buf.render(0);
+        let (output, _, _) = buf.render(0, 0);
         // head=0, tail=0 → no lines stored, only banner
         assert!(output.contains("10 lines omitted for LLM"));
         // No actual content lines
@@ -995,7 +984,7 @@ mod tests {
             buf.push(format!("line {}", i));
         }
         assert_eq!(buf.total_lines(), 10);
-        let (output, _, _) = buf.render(10); // threshold == total_lines
+        let (output, _, _) = buf.render(10, 5); // threshold == total_lines
         assert!(!output.contains("omitted"));
     }
 
@@ -1007,22 +996,32 @@ mod tests {
             buf.push(format!("line {}", i));
         }
         assert_eq!(buf.total_lines(), 11);
-        let (output, _, _) = buf.render(10); // threshold < total_lines
+        let (output, _, _) = buf.render(10, 5); // threshold < total_lines
         assert!(output.contains("omitted"));
     }
 
     #[test]
-    fn buffer_expand_tail_no_shrink() {
-        let mut buf = HeadTailBuffer::new(5, 10);
-        buf.expand_tail(3); // smaller value → should NOT shrink
-                            // Push enough to test that the original tail_cap=10 is preserved
-        for i in 0..20 {
+    fn buffer_display_tail_trims_to_window() {
+        // Retain a large tail (120) but display only a small window: simulates a
+        // successful exit reusing a buffer sized for the error tail.
+        let mut buf = HeadTailBuffer::new(5, 120);
+        for i in 0..200 {
             buf.push(format!("line {}", i));
         }
-        let (output, _, _) = buf.render(0);
-        // tail should still be 10 (not shrunk to 3)
-        assert!(output.contains("line 10")); // last 10 lines: 10..19
-        assert!(output.contains("line 19"));
+        // display_tail = 5 → only the last 5 retained lines are shown.
+        let (output, _, _) = buf.render(10, 5);
+        assert!(output.contains("line 199"));
+        assert!(output.contains("line 195"));
+        assert!(!output.contains("line 194"));
+        // display_tail = 50 → a wider window, still within the 120 retained.
+        let mut buf2 = HeadTailBuffer::new(5, 120);
+        for i in 0..200 {
+            buf2.push(format!("line {}", i));
+        }
+        let (output2, _, _) = buf2.render(10, 50);
+        assert!(output2.contains("line 150"));
+        assert!(output2.contains("line 199"));
+        assert!(!output2.contains("line 149"));
     }
 
     #[test]
@@ -1032,9 +1031,9 @@ mod tests {
             buf.push(format!("line {}", i));
         }
         assert_eq!(buf.total_lines(), 10_000);
-        assert!(buf.was_truncated(10));
+        assert!(buf.was_truncated(10, 5));
 
-        let (output, _, _) = buf.render(10);
+        let (output, _, _) = buf.render(10, 5);
         // Head: lines 0-4
         for i in 0..5 {
             assert!(output.contains(&format!("line {}", i)));
@@ -1053,7 +1052,7 @@ mod tests {
     #[test]
     fn pipeline_empty_input() {
         let pipe = FilterPipeline::new(30, 30, false);
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         assert_eq!(result.output, "");
         assert_eq!(result.lines_raw, 0);
         assert_eq!(result.lines_final, 0);
@@ -1066,7 +1065,7 @@ mod tests {
     fn pipeline_single_line() {
         let mut pipe = FilterPipeline::new(30, 30, false);
         pipe.feed("hello world".into());
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         assert_eq!(result.output, "hello world");
         assert_eq!(result.lines_raw, 1);
         assert_eq!(result.lines_final, 1);
@@ -1079,7 +1078,7 @@ mod tests {
         for _ in 0..100 {
             pipe.feed("same line".into());
         }
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         // 100 identical lines should collapse to "same line (×100)"
         assert!(result.output.contains("same line (×100)"));
         assert_eq!(result.lines_final, 1);
@@ -1092,7 +1091,7 @@ mod tests {
         for line in lines {
             pipe.feed(line.into());
         }
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         // 50 identical blanks → collapsed to 1 blank (×50), then squeeze passes it (it's only 1)
         // The collapse makes it "×50" so it becomes non-blank text
         assert_eq!(result.lines_final, 1);
@@ -1108,27 +1107,12 @@ mod tests {
         for i in 0..50 {
             pipe.feed(format!("u{}", i).into());
         }
-        let result = pipe.finish(10, 0);
+        let result = pipe.finish(10, 0, 5);
         // The 50 repeats should collapse to 1 line "repeat (×50)"
         // Then 50 unique lines → total 51 lines after collapse
         // With head=5, tail=5, threshold=10 → truncation should occur
         assert!(result.truncated);
         assert!(result.output.contains("repeat (×50)"));
-    }
-
-    #[test]
-    fn pipeline_expand_tail_before_finish() {
-        let mut pipe = FilterPipeline::new(5, 5, false);
-        for i in 0..100 {
-            pipe.feed(format!("u{}", i).into());
-        }
-        pipe.expand_tail(20);
-        // expand_tail only affects future pushes, but all lines are already pushed
-        // so the tail is still 5
-        let result = pipe.finish(10, 0);
-        assert!(result.truncated);
-        // Even after expand, lines already dropped are gone
-        assert!(result.output.contains("u99"));
     }
 
     #[test]
@@ -1140,7 +1124,7 @@ mod tests {
             raw_bytes += line.len() + 1;
             pipe.feed(line.into());
         }
-        let result = pipe.finish(10, raw_bytes);
+        let result = pipe.finish(10, raw_bytes, 5);
         assert!(result.truncated);
         assert!(result.bytes_raw > result.bytes_final);
     }
@@ -1151,7 +1135,7 @@ mod tests {
         for i in 0..200 {
             pipe.feed(format!("u{}", i).into());
         }
-        let result = pipe.finish(10, 0);
+        let result = pipe.finish(10, 0, 5);
         assert!(result.truncated);
         assert!(result.lines_raw > result.lines_final);
     }
@@ -1163,7 +1147,7 @@ mod tests {
         pipe.feed("last".into());
         pipe.feed("last".into());
         pipe.feed("last".into());
-        let result = pipe.finish(100, 0);
+        let result = pipe.finish(100, 0, 30);
         // flush should emit the pending "last (×3)"
         assert!(result.output.contains("first"));
         assert!(result.output.contains("last (×3)"));

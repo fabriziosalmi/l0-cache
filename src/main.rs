@@ -57,15 +57,7 @@ fn main() {
     }
 
     // ── Safety Command Guard ────────────────────────────────────────────
-    let should_guard = if args.no_guard {
-        false
-    } else if args.guard {
-        true
-    } else if let Ok(val) = std::env::var("L0_CACHE_GUARD") {
-        val == "1"
-    } else {
-        telemetry::is_llm_environment()
-    };
+    let should_guard = telemetry::guard_enabled(args.guard, args.no_guard);
 
     if should_guard && !args.command.is_empty() {
         if let Err(reason) = telemetry::check_dangerous_command(&args.cmd_name(), &args.command) {
