@@ -493,6 +493,75 @@ fn concurrent_metric_writers_do_not_corrupt_the_log() {
     let _ = std::fs::remove_dir_all(&xdg);
 }
 
+/// Resident memory (KB) of a process via `ps`, or None if it can't be read.
+#[cfg(unix)]
+fn rss_kb(pid: u32) -> Option<u64> {
+    let out = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .lines()
+        .next()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(unix)]
+#[test]
+fn memory_stays_bounded_on_a_giant_newline_free_stream() {
+    // Push ~100 MB as a SINGLE line with no newline (the minified-bundle OOM case).
+    // With the bounded reader, l0-cache must keep only ~1 MB regardless of input
+    // size: we sample its RSS while it runs and assert the peak stays far below the
+    // input volume. (Before the fix, RSS tracked the input — the line is buffered
+    // whole and again as the stored head line → ~200 MB.)
+    let t = get_t_bin();
+    let xdg = temp_xdg("rss");
+    let mut child = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args([
+            "--no-auto",
+            "sh",
+            "-c",
+            "head -c 104857600 /dev/zero | tr '\\0' a",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+
+    let pid = child.id();
+    let start = Instant::now();
+    let mut peak_kb = 0u64;
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => break,
+            None => {
+                if let Some(kb) = rss_kb(pid) {
+                    peak_kb = peak_kb.max(kb);
+                }
+                if start.elapsed() > Duration::from_secs(30) {
+                    let _ = child.kill();
+                    panic!("l0-cache hung on a 200 MB single line (possible unbounded buffering)");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    assert!(peak_kb > 0, "could not sample RSS via ps");
+    // 200 MB pushed in; peak must be a small fraction of that. Generous ceiling
+    // (120 MB) to avoid flakiness, while the broken behavior would be ~200 MB.
+    assert!(
+        peak_kb < 120 * 1024,
+        "peak RSS {peak_kb} KB is too high for a bounded buffer — the giant line was buffered whole"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
 #[test]
 fn stats_renders_with_seeded_metrics() {
     let t = get_t_bin();

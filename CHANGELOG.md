@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Memory is now bounded on a giant newline-free stream (e.g. a minified bundle).
+  Line reading no longer uses `read_until`, which buffered the entire line before
+  the 1 MB cap could apply; a chunked reader keeps at most ~1 MB and drains the
+  rest (still counted for accurate `bytes_raw`). A new RSS stress test pushes
+  100 MB as a single line and asserts the resident set stays far below it.
+
 ## [0.1.1] - 2026-06-04
 
 ### Fixed
