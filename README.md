@@ -261,6 +261,30 @@ l0-cache --completions zsh > ~/.zsh/completions/_l0-cache
 l0-cache --completions fish > ~/.config/fish/completions/l0-cache.fish
 ```
 
+## Claude Code integration (optional)
+
+Normally you prefix a command yourself (`l0-cache cargo test`). To let Claude Code
+do that automatically for noisy commands — with nothing to remember — there is an
+opt-in [`PreToolUse`](https://docs.claude.com/en/docs/claude-code/hooks) hook,
+managed by `claude-hook.sh`:
+
+```sh
+./claude-hook.sh install     # write the wrapper + register the hook (needs jq)
+./claude-hook.sh enable      # turn it ON  (instant on/off, no restart)
+# → start a new Claude Code session so the hook loads
+./claude-hook.sh disable     # turn it OFF immediately
+./claude-hook.sh status      # installed? registered? on/off + version
+./claude-hook.sh uninstall   # remove it
+```
+
+The hook is **conservative and fail-safe**: it only wraps simple single commands
+and passes through anything risky — pipes, `&&`/`||`, redirects, `cd`/`export`,
+command substitution, multi-line, and interactive programs — unchanged. Any error
+makes the command run exactly as sent, and it does **not** auto-approve commands
+(they still go through your normal permission rules). It is **off by default** and
+toggled by a sentinel file (`~/.config/l0-cache/hook.enabled`), so you can disable
+it instantly if anything misbehaves. Honors `$CLAUDE_CONFIG_DIR` / `$XDG_CONFIG_HOME`.
+
 ## Known Limitations
 
 - **SSH without PTY**: when running `ssh host l0-cache cargo build` (no `-t` flag),
