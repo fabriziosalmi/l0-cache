@@ -1,0 +1,1207 @@
+//! Filter engine: streaming-safe pipeline for output reduction.
+//!
+//! Pipeline order: ANSI strip → collapse-identical → whitespace squeeze → head/tail buffer.
+//! All filters work line-by-line with O(head+tail) RAM.
+
+use std::borrow::Cow;
+use std::collections::VecDeque;
+
+// ── Defaults ────────────────────────────────────────────────────────────────
+
+pub const DEFAULT_HEAD: usize = 30;
+pub const DEFAULT_TAIL: usize = 30;
+pub const DEFAULT_TAIL_ERROR: usize = 120;
+/// Only truncate if total lines exceed this threshold.
+pub const DEFAULT_THRESHOLD: usize = 100;
+
+// ── ANSI Strip ──────────────────────────────────────────────────────────────
+
+/// Remove all ANSI escape sequences from a byte slice, returning a String.
+/// If the input isn't valid UTF-8 after stripping, returns the lossy version.
+pub fn strip_ansi(input: &[u8]) -> Cow<'_, str> {
+    // Fast path: no ESC byte → no ANSI escapes possible
+    if !input.contains(&0x1b) {
+        return String::from_utf8_lossy(input);
+    }
+    let stripped = strip_ansi_escapes::strip(input);
+    match String::from_utf8(stripped) {
+        Ok(s) => Cow::Owned(s),
+        Err(e) => Cow::Owned(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    }
+}
+
+// ── Line Collapse (Identical + Prefix-based) ────────────────────────────────
+
+const MIN_PREFIX_LEN: usize = 2;
+
+/// Skip common timestamp prefixes to find the actual "first word".
+fn skip_timestamp(line: &str) -> &str {
+    let s = line.trim_start();
+
+    // Check syslog: "Oct 12 10:30:00 " (16 chars)
+    if s.len() >= 15 {
+        let month = &s[0..3];
+        let is_month = matches!(
+            month,
+            "Jan"
+                | "Feb"
+                | "Mar"
+                | "Apr"
+                | "May"
+                | "Jun"
+                | "Jul"
+                | "Aug"
+                | "Sep"
+                | "Oct"
+                | "Nov"
+                | "Dec"
+        );
+        if is_month {
+            let bytes = s.as_bytes();
+            // simple check for time colon: e.g. "Oct 12 10:30:00" -> bytes[12] or bytes[13] == ':'
+            if bytes.len() > 14 && (bytes[12] == b':' || bytes[13] == b':') {
+                return s[15..].trim_start();
+            }
+        }
+    }
+
+    // Check ISO8601 or similar (starts with digit)
+    if let Some(c) = s.chars().next() {
+        if c.is_ascii_digit() {
+            let mut parts = s.splitn(3, |c: char| c.is_whitespace());
+            let t1 = parts.next().unwrap_or("");
+            let is_date = t1.contains('-') || t1.contains('/');
+            let is_time = t1.contains(':');
+
+            if is_date || is_time {
+                // Full ISO timestamp: 2024-10-12T10:30:00Z
+                if t1.contains('T') && t1.contains(':') {
+                    return s[t1.len()..].trim_start();
+                }
+
+                // Just a date, maybe next token is a time
+                if let Some(t2) = parts.next() {
+                    let is_t2_time = t2.contains(':') && t2.chars().any(|ch| ch.is_ascii_digit());
+                    if is_t2_time {
+                        let idx = s.find(t2).unwrap() + t2.len();
+                        return s[idx..].trim_start();
+                    }
+                }
+
+                // Else skip just t1
+                return s[t1.len()..].trim_start();
+            }
+        }
+    }
+
+    s
+}
+
+/// Extract the first whitespace-delimited word from a line (the "prefix"), ignoring timestamps.
+/// Returns `None` for blank or whitespace-only lines.
+fn first_word(line: &str) -> Option<&str> {
+    skip_timestamp(line).split_whitespace().next()
+}
+
+/// Extract prefix including leading indentation
+fn prefix_with_indent(line: &str) -> Option<&str> {
+    let word = line.split_whitespace().next()?;
+    let idx = line.find(word)?;
+    Some(&line[..idx + word.len()])
+}
+
+/// Two-mode collapser for consecutive similar lines:
+///
+/// 1. **Identical**: exact string match → `line (×N)`
+/// 2. **Prefix**: same first word → shows prefix and count
+///    e.g. "  Compiling serde v1.0" ... "  Compiling clap v4.0" → "  Compiling ... (×2)"
+///
+/// Prefix mode catches: cargo Compiling, npm Downloading, test runners,
+/// docker log lines with timestamps, CI pipeline stage output, etc.
+pub struct CollapseLines {
+    last_line: Option<String>,
+    repeat_count: usize,
+    /// When in prefix-collapse mode, the first line of the run
+    first_in_run: Option<String>,
+    /// The prefix (first word) that's being collapsed
+    run_prefix: Option<String>,
+}
+
+impl CollapseLines {
+    pub fn new() -> Self {
+        Self {
+            last_line: None,
+            repeat_count: 0,
+            first_in_run: None,
+            run_prefix: None,
+        }
+    }
+
+    /// Feed a line. Returns emitted lines (0, 1, or 2) via callback-style Option<String>.
+    /// The caller must call `flush()` at EOF to get remaining pending lines.
+    /// Takes ownership only when buffering a new line.
+    pub fn feed(&mut self, line: Cow<'_, str>) -> Option<String> {
+        match &self.last_line {
+            // Case 1: Exact identical match (works for both identical-run and prefix-run)
+            Some(prev) if prev == line.as_ref() => {
+                self.repeat_count += 1;
+                None
+            }
+            // Case 2: Same prefix (first word) — prefix-collapse
+            Some(prev) if self.same_prefix(prev, line.as_ref()) => {
+                if self.first_in_run.is_none() {
+                    // Start prefix run. Move the first line of the run to first_in_run.
+                    self.first_in_run = self.last_line.take();
+                    self.run_prefix = first_word(self.first_in_run.as_deref().unwrap_or(""))
+                        .map(|s| s.to_string());
+                }
+                self.repeat_count += 1;
+                self.last_line = Some(line.into_owned());
+                None
+            }
+            // Case 3: Different line — emit pending, start new
+            _ => {
+                let emit = self.emit_pending();
+                self.last_line = Some(line.into_owned());
+                self.repeat_count = 1;
+                emit
+            }
+        }
+    }
+
+    /// Flush remaining buffered lines at EOF.
+    pub fn flush(&mut self) -> Option<String> {
+        self.emit_pending()
+    }
+
+    /// Check if two lines share the same first word (prefix) or are fuzzily identical.
+    /// Returns false for blank lines or single-char prefixes (too noisy).
+    fn same_prefix(&self, a: &str, b: &str) -> bool {
+        if let (Some(wa), Some(wb)) = (first_word(a), first_word(b)) {
+            if wa.len() >= MIN_PREFIX_LEN && wa == wb {
+                return true;
+            }
+        }
+
+        // --- 80/20 Fuzzy Line Collapse ---
+        // If the first word differs (e.g. dynamic hashes or IDs at the start),
+        // we extract the first 40 characters, keep ONLY alphabetic letters, and compare.
+        // This instantly deduplicates lines like:
+        // "[info] 123 processing" vs "[info] 456 processing" -> "infoprocessing"
+        let extract_fuzzy = |s: &str| {
+            s.chars()
+                .take(40)
+                .filter(|c| c.is_alphabetic())
+                .collect::<String>()
+        };
+
+        let fa = extract_fuzzy(a);
+        let fb = extract_fuzzy(b);
+        fa.len() >= 10 && fa == fb
+    }
+
+    fn emit_pending(&mut self) -> Option<String> {
+        if let Some(first) = self.first_in_run.take() {
+            let count = self.repeat_count;
+            self.repeat_count = 0;
+            self.last_line = None;
+            self.run_prefix = None;
+            let prefix = prefix_with_indent(&first).unwrap_or(&first);
+            Some(format!("{} ... (×{})", prefix, count))
+        } else if let Some(line) = self.last_line.take() {
+            let count = self.repeat_count;
+            self.repeat_count = 0;
+            if count > 1 {
+                Some(format!("{} (×{})", line, count))
+            } else {
+                Some(line)
+            }
+        } else {
+            None
+        }
+    }
+}
+
+// ── Whitespace Squeeze ──────────────────────────────────────────────────────
+
+/// State tracker for squeezing consecutive blank lines.
+pub struct WhitespaceSqueeze {
+    consecutive_blanks: usize,
+}
+
+impl WhitespaceSqueeze {
+    pub fn new() -> Self {
+        Self {
+            consecutive_blanks: 0,
+        }
+    }
+
+    /// Feed a line. Returns `Some(line)` if the line should be emitted.
+    #[allow(dead_code)]
+    pub fn feed<'a>(&mut self, line: &'a str) -> Option<&'a str> {
+        if line.trim().is_empty() {
+            self.consecutive_blanks += 1;
+            if self.consecutive_blanks <= 1 {
+                Some(line)
+            } else {
+                None // suppress extra blanks
+            }
+        } else {
+            self.consecutive_blanks = 0;
+            Some(line)
+        }
+    }
+
+    /// Feed an owned line. Returns `Some(line)` if the line should be emitted.
+    pub fn feed_owned(&mut self, line: String) -> Option<String> {
+        if line.trim().is_empty() {
+            self.consecutive_blanks += 1;
+            if self.consecutive_blanks <= 1 {
+                Some(line)
+            } else {
+                None // suppress extra blanks
+            }
+        } else {
+            self.consecutive_blanks = 0;
+            Some(line)
+        }
+    }
+}
+
+// ── Head/Tail Ring Buffer ───────────────────────────────────────────────────
+
+/// Streaming head/tail buffer that stores the first `head_cap` lines
+/// and the last `tail_cap` lines with O(head+tail) memory.
+pub struct HeadTailBuffer {
+    head_cap: usize,
+    tail_cap: usize,
+    head: Vec<String>,
+    tail: VecDeque<String>,
+    total_lines: usize,
+}
+
+const PREALLOCATION_CAP: usize = 1024;
+
+impl HeadTailBuffer {
+    pub fn new(head_cap: usize, tail_cap: usize) -> Self {
+        // Cap pre-allocation to avoid capacity overflow with usize::MAX (raw mode).
+        // The actual buffer grows on-demand; with_capacity is a hint.
+        let head_prealloc = head_cap.min(PREALLOCATION_CAP);
+        let tail_prealloc = tail_cap.min(PREALLOCATION_CAP);
+        Self {
+            head_cap,
+            tail_cap,
+            head: Vec::with_capacity(head_prealloc),
+            tail: VecDeque::with_capacity(tail_prealloc.saturating_add(1)),
+            total_lines: 0,
+        }
+    }
+
+    /// Feed a filtered line into the buffer.
+    pub fn push(&mut self, line: String) {
+        self.total_lines += 1;
+
+        if self.head.len() < self.head_cap {
+            self.head.push(line);
+        } else if self.tail_cap > 0 {
+            if self.tail.len() == self.tail_cap {
+                self.tail.pop_front();
+            }
+            self.tail.push_back(line);
+        }
+        // else: tail_cap == 0 → drop the line (only counting)
+    }
+
+    /// Total lines seen so far.
+    pub fn total_lines(&self) -> usize {
+        self.total_lines
+    }
+
+    /// Was the output actually truncated?
+    /// Must consider the threshold: render() doesn't truncate below threshold.
+    pub fn was_truncated(&self, threshold: usize) -> bool {
+        self.total_lines > threshold
+            && self.total_lines > self.head_cap.saturating_add(self.tail_cap)
+    }
+
+    /// Expand the tail capacity (e.g., on error exit).
+    /// This only affects future pushes — lines already dropped are gone.
+    /// Call this BEFORE pushing if you know exit code upfront, or accept
+    /// that retroactive expansion is best-effort.
+    pub fn expand_tail(&mut self, new_tail_cap: usize) {
+        if new_tail_cap > self.tail_cap {
+            self.tail_cap = new_tail_cap;
+            // VecDeque will grow naturally on next push
+        }
+    }
+
+    /// Render the final output. Returns (output_string, lines_final, bytes_final).
+    /// Consumes self to avoid cloning head/tail lines.
+    pub fn render(self, threshold: usize) -> (String, usize, usize) {
+        let home_path = std::env::var("HOME").ok().filter(|h| !h.is_empty());
+        let process_line = |mut s: String| -> String {
+            if let Some(home) = &home_path {
+                if s.contains(home) {
+                    s = s.replace(home, "~");
+                }
+            }
+            s
+        };
+
+        // If below threshold, dump everything — no truncation banner
+        if self.total_lines <= threshold {
+            let all: Vec<String> = self
+                .head
+                .into_iter()
+                .chain(self.tail)
+                .map(process_line)
+                .collect();
+            let joined = all.join("\n");
+            let lines = all.len();
+            let bytes = joined.len();
+            return (joined, lines, bytes);
+        }
+
+        // Above threshold: head + banner + tail
+        let omitted = self
+            .total_lines
+            .saturating_sub(self.head.len().saturating_add(self.tail.len()));
+
+        let mut parts: Vec<String> = self.head.into_iter().map(process_line).collect();
+
+        // Banner
+        if omitted > 0 {
+            parts.push(String::new());
+            parts.push(format!("... [{} lines omitted for LLM] ...", omitted));
+            parts.push(String::new());
+        }
+
+        // Tail
+        parts.extend(self.tail.into_iter().map(process_line));
+
+        let joined = parts.join("\n");
+        let lines = parts.len();
+        let bytes = joined.len();
+        (joined, lines, bytes)
+    }
+}
+
+// ── Streaming Filter Pipeline ───────────────────────────────────────────────
+
+/// The full streaming pipeline. Feed lines one by one, then call `finish()`.
+pub struct FilterPipeline {
+    collapse: CollapseLines,
+    squeeze: WhitespaceSqueeze,
+    buffer: HeadTailBuffer,
+    only_errors: bool,
+    auto_tuned: bool,
+}
+
+impl FilterPipeline {
+    pub fn new(head_cap: usize, tail_cap: usize, only_errors: bool) -> Self {
+        Self {
+            collapse: CollapseLines::new(),
+            squeeze: WhitespaceSqueeze::new(),
+            buffer: HeadTailBuffer::new(head_cap, tail_cap),
+            only_errors,
+            auto_tuned: false,
+        }
+    }
+
+    /// Feed a raw line (already ANSI-stripped). Applies collapse + squeeze + buffer.
+    /// Uses Cow to avoid cloning through the pipeline.
+    pub fn feed(&mut self, line: Cow<'_, str>) {
+        let line_lower = if self.only_errors || !self.auto_tuned {
+            line.to_lowercase()
+        } else {
+            String::new()
+        };
+
+        // --- 80/20 only_errors Filter ---
+        if self.only_errors {
+            let is_error = line_lower.contains("error")
+                || line_lower.contains("warn")
+                || line_lower.contains("fail")
+                || line_lower.contains("exception")
+                || line_lower.contains("panic")
+                || line_lower.contains("traceback")
+                || line_lower.contains("fatal");
+
+            if !is_error {
+                return;
+            }
+        }
+
+        // --- 80/20 Auto-Tuning Ecosystem Heuristics ---
+        if !self.auto_tuned {
+            let total = self.buffer.head_cap + self.buffer.tail_cap;
+            if total > 0 {
+                // Python/Rust: errors are at the bottom -> 10% head, 90% tail
+                if line_lower.contains("traceback (most recent call last)")
+                    || line_lower.contains("panicked at")
+                {
+                    self.buffer.head_cap = (total as f32 * 0.1) as usize;
+                    self.buffer.tail_cap = total - self.buffer.head_cap;
+                    self.auto_tuned = true;
+                }
+                // Java: exceptions are at the top, caused by at bottom -> 50/50
+                else if line_lower.contains("exception in thread") {
+                    self.buffer.head_cap = (total as f32 * 0.5) as usize;
+                    self.buffer.tail_cap = total - self.buffer.head_cap;
+                    self.auto_tuned = true;
+                }
+            }
+        }
+
+        // Step 1: Collapse identical consecutive
+        if let Some(collapsed) = self.collapse.feed(line) {
+            // Step 2: Whitespace squeeze
+            if let Some(squeezed) = self.squeeze.feed_owned(collapsed) {
+                // Step 3: Into head/tail buffer
+                self.buffer.push(squeezed);
+            }
+        }
+    }
+
+    /// Expand tail capacity (call before finish if exit code != 0).
+    pub fn expand_tail(&mut self, new_tail_cap: usize) {
+        self.buffer.expand_tail(new_tail_cap);
+    }
+
+    /// Finalize: flush pending collapse state, return rendered output and stats.
+    /// `raw_bytes_override`: true raw byte count from runner (pre-filter), for accurate metrics.
+    pub fn finish(mut self, threshold: usize, raw_bytes_override: usize) -> FilterResult {
+        // Flush the collapse buffer
+        if let Some(last) = self.collapse.flush() {
+            if let Some(squeezed) = self.squeeze.feed_owned(last) {
+                self.buffer.push(squeezed);
+            }
+        }
+
+        let total_lines_raw = self.buffer.total_lines();
+        let truncated = self.buffer.was_truncated(threshold);
+        let (output, lines_final, bytes_final) = self.buffer.render(threshold);
+
+        FilterResult {
+            output,
+            lines_raw: total_lines_raw,
+            lines_final,
+            bytes_raw: raw_bytes_override,
+            bytes_final,
+            truncated,
+        }
+    }
+}
+
+/// Result of the full filter pipeline.
+pub struct FilterResult {
+    pub output: String,
+    pub lines_raw: usize,
+    pub lines_final: usize,
+    pub bytes_raw: usize,
+    pub bytes_final: usize,
+    pub truncated: bool,
+}
+
+// ── Binary Detection ────────────────────────────────────────────────────────
+
+const BINARY_CHECK_BYTES: usize = 8192;
+
+/// Check if a byte slice looks like binary content (contains null bytes
+/// or isn't valid UTF-8). Check the first ~8KB.
+pub fn looks_binary(data: &[u8]) -> bool {
+    let check_len = data.len().min(BINARY_CHECK_BYTES);
+    let slice = &data[..check_len];
+
+    // Null bytes = almost certainly binary
+    if slice.contains(&0) {
+        return true;
+    }
+
+    // Not valid UTF-8 = probably binary
+    std::str::from_utf8(slice).is_err()
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ANSI strip tests ────────────────────────────────────────────────
+
+    #[test]
+    fn strip_ansi_removes_colors() {
+        let input = b"\x1b[31mERROR\x1b[0m: something failed";
+        let result = strip_ansi(input);
+        assert_eq!(result, "ERROR: something failed");
+    }
+
+    #[test]
+    fn strip_ansi_passthrough_clean() {
+        let input = b"no colors here";
+        assert_eq!(strip_ansi(input), "no colors here");
+    }
+
+    // ── Collapse identical/prefix tests ──────────────────────────────────
+
+    #[test]
+    fn collapse_no_repeats() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("a".into()), None);
+        assert_eq!(c.feed("b".into()), Some("a".into()));
+        assert_eq!(c.feed("c".into()), Some("b".into()));
+        assert_eq!(c.flush(), Some("c".into()));
+    }
+
+    #[test]
+    fn collapse_with_repeats() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("warn: X".into()), None);
+        assert_eq!(c.feed("warn: X".into()), None);
+        assert_eq!(c.feed("warn: X".into()), None);
+        assert_eq!(c.feed("other".into()), Some("warn: X (×3)".into()));
+        assert_eq!(c.flush(), Some("other".into()));
+    }
+
+    #[test]
+    fn collapse_repeats_at_end() {
+        let mut c = CollapseLines::new();
+        c.feed("a".into());
+        c.feed("a".into());
+        c.feed("a".into());
+        assert_eq!(c.flush(), Some("a (×3)".into()));
+    }
+
+    #[test]
+    fn collapse_prefix_simple() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("  Compiling serde v1.0".into()), None);
+        assert_eq!(c.feed("  Compiling clap v4.0".into()), None);
+        assert_eq!(
+            c.feed("Finished dev".into()),
+            Some("  Compiling ... (×2)".into())
+        );
+        assert_eq!(c.flush(), Some("Finished dev".into()));
+    }
+
+    #[test]
+    fn collapse_prefix_non_matching() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("  Compiling serde v1.0".into()), None);
+        assert_eq!(
+            c.feed("  Downloading clap v4.0".into()),
+            Some("  Compiling serde v1.0".into())
+        );
+        assert_eq!(c.flush(), Some("  Downloading clap v4.0".into()));
+    }
+
+    #[test]
+    fn collapse_prefix_single_char_prefix() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("- test 1".into()), None);
+        assert_eq!(c.feed("- test 2".into()), Some("- test 1".into()));
+        assert_eq!(c.flush(), Some("- test 2".into()));
+    }
+
+    #[test]
+    fn collapse_prefix_mixed_exact_and_prefix() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("  Compiling serde v1.0".into()), None);
+        assert_eq!(c.feed("  Compiling serde v1.0".into()), None);
+        assert_eq!(c.feed("  Compiling clap v4.0".into()), None);
+        assert_eq!(c.feed("other".into()), Some("  Compiling ... (×3)".into()));
+        assert_eq!(c.flush(), Some("other".into()));
+    }
+
+    // ── Whitespace squeeze tests ────────────────────────────────────────
+
+    #[test]
+    fn squeeze_allows_single_blank() {
+        let mut s = WhitespaceSqueeze::new();
+        assert!(s.feed("text").is_some());
+        assert!(s.feed("").is_some()); // first blank: keep
+        assert!(s.feed("more").is_some());
+    }
+
+    #[test]
+    fn squeeze_removes_extra_blanks() {
+        let mut s = WhitespaceSqueeze::new();
+        assert!(s.feed("text").is_some());
+        assert!(s.feed("").is_some()); // 1st blank: keep
+        assert!(s.feed("").is_none()); // 2nd blank: suppress
+        assert!(s.feed("  ").is_none()); // 3rd blank (whitespace only): suppress
+        assert!(s.feed("more").is_some()); // text resets counter
+    }
+
+    // ── Head/Tail buffer tests ──────────────────────────────────────────
+
+    #[test]
+    fn buffer_under_threshold_no_truncation() {
+        let mut buf = HeadTailBuffer::new(5, 5);
+        for i in 0..8 {
+            buf.push(format!("line {}", i));
+        }
+        assert!(!buf.was_truncated(100));
+        let (output, lines, _) = buf.render(100);
+        assert_eq!(lines, 8);
+        assert!(!output.contains("omitted"));
+    }
+
+    #[test]
+    fn buffer_exactly_head_plus_tail() {
+        let mut buf = HeadTailBuffer::new(3, 3);
+        for i in 0..6 {
+            buf.push(format!("line {}", i));
+        }
+        assert!(!buf.was_truncated(6));
+        let (output, _, _) = buf.render(6);
+        assert!(!output.contains("omitted"));
+    }
+
+    #[test]
+    fn buffer_truncation_works() {
+        let mut buf = HeadTailBuffer::new(3, 3);
+        for i in 0..100 {
+            buf.push(format!("line {}", i));
+        }
+        assert!(buf.was_truncated(6));
+        assert_eq!(buf.total_lines(), 100);
+
+        let (output, _, _) = buf.render(6);
+        // Should contain head lines
+        assert!(output.contains("line 0"));
+        assert!(output.contains("line 1"));
+        assert!(output.contains("line 2"));
+        // Should contain tail lines
+        assert!(output.contains("line 97"));
+        assert!(output.contains("line 98"));
+        assert!(output.contains("line 99"));
+        // Should have banner
+        assert!(output.contains("94 lines omitted for LLM"));
+        // Should NOT contain middle lines
+        assert!(!output.contains("line 50"));
+    }
+
+    #[test]
+    fn buffer_one_line() {
+        let mut buf = HeadTailBuffer::new(30, 30);
+        buf.push("solo".into());
+        let (output, lines, _) = buf.render(100);
+        assert_eq!(output, "solo");
+        assert_eq!(lines, 1);
+    }
+
+    #[test]
+    fn strip_ansi_osc_sequences() {
+        let input = b"Hello\x1b]0;Title\x07World";
+        let out = strip_ansi(input);
+        assert_eq!(out, "HelloWorld");
+    }
+
+    #[test]
+    fn buffer_empty() {
+        let buf = HeadTailBuffer::new(30, 30);
+        let (output, lines, _) = buf.render(100);
+        assert_eq!(output, "");
+        assert_eq!(lines, 0);
+    }
+
+    #[test]
+    fn buffer_expand_tail() {
+        let mut buf = HeadTailBuffer::new(3, 3);
+        // Push 10 lines with small tail
+        for i in 0..5 {
+            buf.push(format!("line {}", i));
+        }
+        // Now expand
+        buf.expand_tail(10);
+        for i in 5..20 {
+            buf.push(format!("line {}", i));
+        }
+        // Tail should now hold up to 10 lines
+        let (output, _, _) = buf.render(6);
+        assert!(output.contains("line 10"));
+        assert!(output.contains("line 19"));
+    }
+
+    // ── Full pipeline tests ─────────────────────────────────────────────
+
+    #[test]
+    fn pipeline_small_output_passthrough() {
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        pipe.feed("hello".into());
+        pipe.feed("world".into());
+        let result = pipe.finish(100, 0);
+        assert_eq!(result.output, "hello\nworld");
+        assert_eq!(result.lines_raw, 2);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn pipeline_truncates_large_output() {
+        let mut pipe = FilterPipeline::new(5, 5, false);
+        for i in 0..200 {
+            pipe.feed(format!("u{}", i).into());
+        }
+        let result = pipe.finish(10, 0);
+        assert!(result.truncated);
+        assert!(result.output.contains("u0"));
+        assert!(result.output.contains("u199"));
+        assert!(result.output.contains("omitted"));
+    }
+
+    #[test]
+    fn pipeline_collapses_and_squeezes() {
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        pipe.feed("warning: unused var".into());
+        pipe.feed("warning: unused var".into());
+        pipe.feed("warning: unused var".into());
+        pipe.feed("".into());
+        pipe.feed("".into());
+        pipe.feed("".into());
+        pipe.feed("done".into());
+        let result = pipe.finish(100, 0);
+        assert!(result.output.contains("warning: unused var (×3)"));
+        // Should only have 1 blank line, not 3
+        assert!(!result.output.contains("\n\n\n"));
+    }
+
+    // ── Binary detection tests ──────────────────────────────────────────
+
+    #[test]
+    fn binary_detects_null_bytes() {
+        assert!(looks_binary(b"hello\x00world"));
+    }
+
+    #[test]
+    fn binary_clean_utf8() {
+        assert!(!looks_binary(b"hello world"));
+    }
+
+    #[test]
+    fn binary_invalid_utf8() {
+        assert!(looks_binary(&[0xFF, 0xFE, 0x80, 0x81]));
+    }
+
+    // ── Additional ANSI strip tests ─────────────────────────────────────
+
+    #[test]
+    fn strip_ansi_complex_sequences() {
+        // Bold + underline + reset
+        let input = b"\x1b[1m\x1b[4mBOLD\x1b[0m";
+        let result = strip_ansi(input);
+        assert_eq!(result, "BOLD");
+    }
+
+    #[test]
+    fn strip_ansi_empty_input() {
+        assert_eq!(strip_ansi(b""), "");
+    }
+
+    #[test]
+    fn strip_ansi_only_escape_codes() {
+        let input = b"\x1b[31m\x1b[0m";
+        assert_eq!(strip_ansi(input), "");
+    }
+
+    #[test]
+    fn strip_ansi_multiline() {
+        let input = b"\x1b[32mOK\x1b[0m\nplain\n\x1b[31mERR\x1b[0m";
+        let result = strip_ansi(input);
+        assert_eq!(result, "OK\nplain\nERR");
+    }
+
+    // ── Additional collapse-identical tests ─────────────────────────────
+
+    #[test]
+    fn collapse_single_line() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("only".into()), None);
+        let flushed = c.flush();
+        assert_eq!(flushed, Some("only".into()));
+        // No "×" annotation for a single occurrence
+        assert!(!flushed.unwrap_or_default().contains('×'));
+    }
+
+    #[test]
+    fn collapse_flush_on_empty() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.flush(), None);
+    }
+
+    #[test]
+    fn collapse_two_different_then_same() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("a".into()), None);
+        assert_eq!(c.feed("b".into()), Some("a".into()));
+        assert_eq!(c.feed("b".into()), None);
+        assert_eq!(c.feed("b".into()), None);
+        let flushed = c.flush();
+        // same_prefix is false for single-char strings, so it emits exact repeats
+        assert_eq!(flushed, Some("b (×3)".into()));
+    }
+
+    #[test]
+    fn collapse_fuzzy_match() {
+        let mut collapse = CollapseLines::new();
+        assert_eq!(
+            collapse.feed(Cow::Borrowed("[info] 1234a processing item")),
+            None
+        );
+        assert_eq!(
+            collapse.feed(Cow::Borrowed("[info] 5678b processing item")),
+            None
+        );
+        assert_eq!(
+            collapse.feed(Cow::Borrowed("[info] 9101c processing item")),
+            None
+        );
+
+        let out = collapse.flush().unwrap();
+        assert!(out.contains("... (×3)"));
+    }
+
+    #[test]
+    fn collapse_alternating() {
+        let mut c = CollapseLines::new();
+        assert_eq!(c.feed("a".into()), None);
+        assert_eq!(c.feed("b".into()), Some("a".into()));
+        assert_eq!(c.feed("a".into()), Some("b".into()));
+        assert_eq!(c.feed("b".into()), Some("a".into()));
+        let flushed = c.flush();
+        assert_eq!(flushed, Some("b".into()));
+        // None of the emitted lines should have a repeat marker
+    }
+
+    // ── Additional whitespace squeeze tests ─────────────────────────────
+
+    #[test]
+    fn squeeze_starts_with_blanks() {
+        let mut s = WhitespaceSqueeze::new();
+        assert!(s.feed("").is_some()); // 1st blank: keep
+        assert!(s.feed("").is_none()); // 2nd blank: suppress
+        assert!(s.feed("").is_none()); // 3rd blank: suppress
+    }
+
+    #[test]
+    fn squeeze_interleaved_blanks() {
+        let mut s = WhitespaceSqueeze::new();
+        assert!(s.feed("text").is_some());
+        assert!(s.feed("").is_some()); // 1st blank after text: keep
+        assert!(s.feed("more").is_some());
+        assert!(s.feed("").is_some()); // 1st blank after more: keep
+        assert!(s.feed("").is_none()); // 2nd consecutive blank: suppress
+        assert!(s.feed("end").is_some());
+    }
+
+    #[test]
+    fn squeeze_all_blanks() {
+        let mut s = WhitespaceSqueeze::new();
+        let mut kept = 0;
+        for _ in 0..5 {
+            if s.feed("").is_some() {
+                kept += 1;
+            }
+        }
+        assert_eq!(kept, 1); // only the first blank passes
+    }
+
+    #[test]
+    fn squeeze_whitespace_only_lines() {
+        let mut s = WhitespaceSqueeze::new();
+        assert!(s.feed("text").is_some());
+        assert!(s.feed("\t").is_some()); // 1st whitespace-only: keep (counts as blank)
+        assert!(s.feed("   ").is_none()); // 2nd whitespace-only: suppress
+        assert!(s.feed("\t  ").is_none()); // 3rd: suppress
+        assert!(s.feed("back").is_some()); // text resets
+    }
+
+    // ── Additional head/tail buffer tests ───────────────────────────────
+
+    #[test]
+    fn buffer_head_zero() {
+        let mut buf = HeadTailBuffer::new(0, 5);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+        assert_eq!(buf.total_lines(), 10);
+        let (output, lines, _) = buf.render(0); // threshold=0 forces banner path
+                                                // Head is empty, so output should only have tail lines
+        assert!(!output.contains("line 0"));
+        assert!(output.contains("line 9"));
+        assert!(output.contains("line 5"));
+        assert_eq!(lines, 5 + 3); // 5 tail + 3 banner lines (empty, banner text, empty)
+    }
+
+    #[test]
+    fn buffer_tail_zero() {
+        let mut buf = HeadTailBuffer::new(5, 0);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+        assert_eq!(buf.total_lines(), 10);
+        // With tail_cap=0, lines beyond head are dropped entirely
+        let (output, _, _) = buf.render(0); // threshold=0 forces banner path
+        assert!(output.contains("line 0"));
+        assert!(output.contains("line 4"));
+        assert!(!output.contains("line 5")); // dropped
+        assert!(!output.contains("line 9")); // dropped
+                                             // Banner shows omitted count
+        assert!(output.contains("5 lines omitted for LLM"));
+    }
+
+    #[test]
+    fn buffer_head_and_tail_zero() {
+        let mut buf = HeadTailBuffer::new(0, 0);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+        assert_eq!(buf.total_lines(), 10);
+        let (output, _, _) = buf.render(0);
+        // head=0, tail=0 → no lines stored, only banner
+        assert!(output.contains("10 lines omitted for LLM"));
+        // No actual content lines
+        assert!(!output.contains("line 0"));
+        assert!(!output.contains("line 9"));
+    }
+
+    #[test]
+    fn buffer_total_lines_tracking() {
+        let mut buf = HeadTailBuffer::new(30, 30);
+        buf.push("hello".into());
+        buf.push("world".into());
+        assert_eq!(buf.total_lines(), 2);
+    }
+
+    #[test]
+    fn buffer_total_lines_accurate() {
+        let mut buf = HeadTailBuffer::new(5, 5);
+        for _ in 0..7 {
+            buf.push("x".into());
+        }
+        assert_eq!(buf.total_lines(), 7);
+        for _ in 0..3 {
+            buf.push("y".into());
+        }
+        assert_eq!(buf.total_lines(), 10);
+    }
+
+    #[test]
+    fn buffer_render_threshold_exact_boundary() {
+        // total_lines == threshold → no banner
+        let mut buf = HeadTailBuffer::new(5, 5);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+        assert_eq!(buf.total_lines(), 10);
+        let (output, _, _) = buf.render(10); // threshold == total_lines
+        assert!(!output.contains("omitted"));
+    }
+
+    #[test]
+    fn buffer_render_threshold_plus_one() {
+        // total_lines == threshold + 1 → banner appears
+        let mut buf = HeadTailBuffer::new(5, 5);
+        for i in 0..11 {
+            buf.push(format!("line {}", i));
+        }
+        assert_eq!(buf.total_lines(), 11);
+        let (output, _, _) = buf.render(10); // threshold < total_lines
+        assert!(output.contains("omitted"));
+    }
+
+    #[test]
+    fn buffer_expand_tail_no_shrink() {
+        let mut buf = HeadTailBuffer::new(5, 10);
+        buf.expand_tail(3); // smaller value → should NOT shrink
+                            // Push enough to test that the original tail_cap=10 is preserved
+        for i in 0..20 {
+            buf.push(format!("line {}", i));
+        }
+        let (output, _, _) = buf.render(0);
+        // tail should still be 10 (not shrunk to 3)
+        assert!(output.contains("line 10")); // last 10 lines: 10..19
+        assert!(output.contains("line 19"));
+    }
+
+    #[test]
+    fn buffer_large_scale() {
+        let mut buf = HeadTailBuffer::new(5, 5);
+        for i in 0..10_000 {
+            buf.push(format!("line {}", i));
+        }
+        assert_eq!(buf.total_lines(), 10_000);
+        assert!(buf.was_truncated(10));
+
+        let (output, _, _) = buf.render(10);
+        // Head: lines 0-4
+        for i in 0..5 {
+            assert!(output.contains(&format!("line {}", i)));
+        }
+        // Tail: lines 9995-9999
+        for i in 9995..10_000 {
+            assert!(output.contains(&format!("line {}", i)));
+        }
+        // Middle should not be present
+        assert!(!output.contains("line 5000"));
+        assert!(output.contains("9990 lines omitted for LLM"));
+    }
+
+    // ── Additional full pipeline tests ──────────────────────────────────
+
+    #[test]
+    fn pipeline_empty_input() {
+        let pipe = FilterPipeline::new(30, 30, false);
+        let result = pipe.finish(100, 0);
+        assert_eq!(result.output, "");
+        assert_eq!(result.lines_raw, 0);
+        assert_eq!(result.lines_final, 0);
+        assert_eq!(result.bytes_raw, 0);
+        assert_eq!(result.bytes_final, 0);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn pipeline_single_line() {
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        pipe.feed("hello world".into());
+        let result = pipe.finish(100, 0);
+        assert_eq!(result.output, "hello world");
+        assert_eq!(result.lines_raw, 1);
+        assert_eq!(result.lines_final, 1);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn pipeline_all_identical() {
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        for _ in 0..100 {
+            pipe.feed("same line".into());
+        }
+        let result = pipe.finish(100, 0);
+        // 100 identical lines should collapse to "same line (×100)"
+        assert!(result.output.contains("same line (×100)"));
+        assert_eq!(result.lines_final, 1);
+    }
+
+    #[test]
+    fn pipeline_all_blanks() {
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        let lines = vec![""; 50];
+        for line in lines {
+            pipe.feed(line.into());
+        }
+        let result = pipe.finish(100, 0);
+        // 50 identical blanks → collapsed to 1 blank (×50), then squeeze passes it (it's only 1)
+        // The collapse makes it "×50" so it becomes non-blank text
+        assert_eq!(result.lines_final, 1);
+    }
+
+    #[test]
+    fn pipeline_mixed_collapse_and_truncation() {
+        let mut pipe = FilterPipeline::new(5, 5, false);
+        // 50 repeats of "repeat" + 50 unique lines = enough to trigger truncation
+        for _ in 0..50 {
+            pipe.feed("repeat".into());
+        }
+        for i in 0..50 {
+            pipe.feed(format!("u{}", i).into());
+        }
+        let result = pipe.finish(10, 0);
+        // The 50 repeats should collapse to 1 line "repeat (×50)"
+        // Then 50 unique lines → total 51 lines after collapse
+        // With head=5, tail=5, threshold=10 → truncation should occur
+        assert!(result.truncated);
+        assert!(result.output.contains("repeat (×50)"));
+    }
+
+    #[test]
+    fn pipeline_expand_tail_before_finish() {
+        let mut pipe = FilterPipeline::new(5, 5, false);
+        for i in 0..100 {
+            pipe.feed(format!("u{}", i).into());
+        }
+        pipe.expand_tail(20);
+        // expand_tail only affects future pushes, but all lines are already pushed
+        // so the tail is still 5
+        let result = pipe.finish(10, 0);
+        assert!(result.truncated);
+        // Even after expand, lines already dropped are gone
+        assert!(result.output.contains("u99"));
+    }
+
+    #[test]
+    fn pipeline_bytes_raw_vs_final() {
+        let mut pipe = FilterPipeline::new(5, 5, false);
+        let mut raw_bytes: usize = 0;
+        for i in 0..200 {
+            let line = format!("u{:05}", i);
+            raw_bytes += line.len() + 1;
+            pipe.feed(line.into());
+        }
+        let result = pipe.finish(10, raw_bytes);
+        assert!(result.truncated);
+        assert!(result.bytes_raw > result.bytes_final);
+    }
+
+    #[test]
+    fn pipeline_lines_raw_vs_final() {
+        let mut pipe = FilterPipeline::new(5, 5, false);
+        for i in 0..200 {
+            pipe.feed(format!("u{}", i).into());
+        }
+        let result = pipe.finish(10, 0);
+        assert!(result.truncated);
+        assert!(result.lines_raw > result.lines_final);
+    }
+
+    #[test]
+    fn pipeline_finish_flushes_pending_collapse() {
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        pipe.feed("first".into());
+        pipe.feed("last".into());
+        pipe.feed("last".into());
+        pipe.feed("last".into());
+        let result = pipe.finish(100, 0);
+        // flush should emit the pending "last (×3)"
+        assert!(result.output.contains("first"));
+        assert!(result.output.contains("last (×3)"));
+    }
+
+    // ── Additional binary detection tests ───────────────────────────────
+
+    #[test]
+    fn binary_empty_input() {
+        assert!(!looks_binary(b""));
+    }
+
+    #[test]
+    fn binary_large_clean_utf8() {
+        let data = vec![b'A'; 16 * 1024]; // 16KB of ASCII
+        assert!(!looks_binary(&data));
+    }
+
+    #[test]
+    fn binary_null_at_boundary() {
+        // Null byte at exactly position 8191 (within the 8KB window)
+        let mut data = vec![b'A'; 8192];
+        data[8191] = 0;
+        assert!(looks_binary(&data));
+    }
+
+    #[test]
+    fn binary_null_after_boundary() {
+        // Null byte at position 8193 (beyond the 8KB check window)
+        let mut data = vec![b'A'; 16 * 1024];
+        data[8193] = 0;
+        assert!(!looks_binary(&data)); // only first 8KB checked
+    }
+
+    #[test]
+    fn binary_mixed_utf8_with_high_bytes() {
+        // Valid multi-byte UTF-8 (Chinese characters)
+        let input = "你好世界 hello 日本語";
+        assert!(!looks_binary(input.as_bytes()));
+    }
+}

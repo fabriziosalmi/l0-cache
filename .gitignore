@@ -1,0 +1,9 @@
+/target
+*.swp
+*.swo
+*~
+.DS_Store
+node_modules
+docs/.vitepress/dist
+docs/.vitepress/cache
+GEMINI.md
