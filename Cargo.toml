@@ -1,6 +1,6 @@
 [package]
 name = "l0-cache"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Lightweight CLI proxy that reduces LLM token consumption via universal output filtering"
 license = "MIT"

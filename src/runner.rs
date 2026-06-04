@@ -11,11 +11,19 @@
 
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::filter::{self, FilterPipeline, FilterResult};
+
+/// Process-group id of the currently running captured child (0 when none).
+///
+/// The captured child is spawned into its OWN process group, and the parent's
+/// SIGINT/SIGTERM handlers forward to this group (see `main::forward_signal`) so
+/// the whole child subtree — not just the `sh` wrapper — receives the signal.
+/// The idle-timeout watchdog kills the same group.
+pub static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
 
 /// Result of running a command through the proxy.
 pub struct RunResult {
@@ -33,6 +41,11 @@ const MAX_LINE_BYTES: usize = 1_048_576;
 /// Prevents OOM when `--raw` is used on commands with massive output.
 const RAW_MODE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
+/// Upper bound on how many extra tail lines we retain to honor a large
+/// `--threshold` (the "no truncation below threshold" promise). Bounds memory
+/// so a pathological `--threshold` cannot make the filtered buffer unbounded.
+const RETAIN_COMPLETENESS_CAP: usize = 100_000;
+
 /// Spawn a command via shell with explicit `2>&1` merge.
 fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::process::ChildStdout>)> {
     // Build a shell command string with proper escaping
@@ -42,12 +55,23 @@ fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::proces
         .collect::<Vec<_>>()
         .join(" ");
 
-    let child_res = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(format!("{} 2>&1", shell_cmd))
         .stdout(Stdio::piped())
-        .stderr(Stdio::null()) // stderr is already merged into stdout
-        .spawn();
+        .stderr(Stdio::null()); // stderr is already merged into stdout
+
+    // Put the child in its own process group so the parent can deliver SIGINT/
+    // SIGTERM (and the watchdog SIGKILL) to the WHOLE subtree via killpg, rather
+    // than only the `sh` wrapper. pgid becomes the child pid.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let child_res = command.spawn();
 
     let mut child = match child_res {
         Ok(c) => c,
@@ -86,18 +110,28 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Read one line from the reader, extracting the bytes up to the newline.
-/// Returns `None` at EOF.
-/// Truncates lines longer than `MAX_LINE_BYTES` to prevent OOM.
-fn read_line_bytes<'a>(
+/// Read one line from the reader into `buf` (newline stripped).
+///
+/// Returns `Some(raw_len)` where `raw_len` is the number of bytes the OS actually
+/// produced for this line (including the line terminator), measured BEFORE any
+/// transformation — this is what feeds the accurate `bytes_raw` metric. Returns
+/// `None` at EOF.
+///
+/// When `transform` is true (filtered mode) the line is cleaned for LLM
+/// consumption: interior carriage-return progress-bar squashing, backspace/bell
+/// resolution, and aggressive truncation of giant single-line JSON payloads.
+/// When `transform` is false (`--raw`) the content is left verbatim — only line
+/// framing and the 1 MB OOM safety cap are applied, so `--raw` is truly raw.
+fn read_line_bytes(
     reader: &mut BufReader<impl Read>,
-    buf: &'a mut Vec<u8>,
-) -> Option<&'a [u8]> {
+    buf: &mut Vec<u8>,
+    transform: bool,
+) -> Option<usize> {
     buf.clear();
     match reader.read_until(b'\n', buf) {
         Ok(0) => None, // EOF
-        Ok(_) => {
-            // Remove trailing newline
+        Ok(raw_len) => {
+            // Line framing (both modes): remove trailing newline (and \r for \r\n).
             if buf.last() == Some(&b'\n') {
                 buf.pop();
             }
@@ -105,61 +139,65 @@ fn read_line_bytes<'a>(
                 buf.pop(); // handle \r\n (Windows line endings from SSH etc.)
             }
 
-            // --- 80/20 Progress Bar Squashing ---
-            // If the buffer still contains '\r' (interior carriage returns), it means
-            // the command updated the same line multiple times (e.g. progress bars).
-            // Emulate terminal behavior by keeping only the part *after* the last '\r'.
-            if let Some(last_r) = buf.iter().rposition(|&b| b == b'\r') {
-                let keep_len = buf.len() - (last_r + 1);
-                buf.copy_within(last_r + 1.., 0);
-                buf.truncate(keep_len);
-            }
+            if transform {
+                // --- 80/20 Progress Bar Squashing ---
+                // If the buffer still contains '\r' (interior carriage returns), it means
+                // the command updated the same line multiple times (e.g. progress bars).
+                // Emulate terminal behavior by keeping only the part *after* the last '\r'.
+                if let Some(last_r) = buf.iter().rposition(|&b| b == b'\r') {
+                    let keep_len = buf.len() - (last_r + 1);
+                    buf.copy_within(last_r + 1.., 0);
+                    buf.truncate(keep_len);
+                }
 
-            // --- 80/20 Backspace and Bell Resolution ---
-            if buf.contains(&0x08) || buf.contains(&0x7f) || buf.contains(&0x07) {
-                let mut write_idx = 0;
-                for read_idx in 0..buf.len() {
-                    let b = buf[read_idx];
-                    if b == 0x08 || b == 0x7f {
-                        // Backspace or DEL: remove previous byte if possible
-                        if write_idx > 0 {
-                            write_idx -= 1;
-                            // Basic UTF-8 continuation byte skip:
-                            while write_idx > 0 && (buf[write_idx] & 0xC0) == 0x80 {
+                // --- 80/20 Backspace and Bell Resolution ---
+                if buf.contains(&0x08) || buf.contains(&0x7f) || buf.contains(&0x07) {
+                    let mut write_idx = 0;
+                    for read_idx in 0..buf.len() {
+                        let b = buf[read_idx];
+                        if b == 0x08 || b == 0x7f {
+                            // Backspace or DEL: remove previous byte if possible
+                            if write_idx > 0 {
                                 write_idx -= 1;
+                                // Basic UTF-8 continuation byte skip:
+                                while write_idx > 0 && (buf[write_idx] & 0xC0) == 0x80 {
+                                    write_idx -= 1;
+                                }
                             }
+                        } else if b == 0x07 {
+                            // Terminal Bell: ignore completely
+                            continue;
+                        } else {
+                            buf[write_idx] = b;
+                            write_idx += 1;
                         }
-                    } else if b == 0x07 {
-                        // Terminal Bell: ignore completely
-                        continue;
-                    } else {
-                        buf[write_idx] = b;
-                        write_idx += 1;
+                    }
+                    buf.truncate(write_idx);
+                }
+
+                // --- 80/20 JSON Smart Truncation (Token Shield) ---
+                // If the line is large (> 2000 bytes) and looks like JSON, aggressively
+                // truncate it to spare the LLM a massive single-line JSON payload.
+                // This is destructive, so it is filtered-mode only (never in --raw).
+                if buf.len() > 2000 {
+                    let first_non_whitespace = buf.iter().find(|&&b| b != b' ' && b != b'\t');
+                    let is_json = matches!(first_non_whitespace, Some(&b'{') | Some(&b'['));
+                    if is_json {
+                        buf.truncate(2000);
+                        buf.extend_from_slice(b"\n... [Large JSON Payload Truncated for LLM] ...");
                     }
                 }
-                buf.truncate(write_idx);
             }
-            // --- 80/20 JSON Smart Truncation (Token Shield) ---
-            // If the line is large (> 2000 bytes) and looks like JSON, aggressively truncate
-            // it early to save the LLM from massive single-line JSON payloads.
-            if buf.len() > 2000 {
-                let first_non_whitespace = buf.iter().find(|&&b| b != b' ' && b != b'\t');
-                let is_json = matches!(first_non_whitespace, Some(&b'{') | Some(&b'['));
 
-                if is_json {
-                    let keep_bytes = 2000;
-                    buf.truncate(keep_bytes);
-                    let suffix = b"\n... [Large JSON Payload Truncated for LLM] ...";
-                    buf.extend_from_slice(suffix);
-                } else if buf.len() > MAX_LINE_BYTES {
-                    // Fallback generic truncation
-                    buf.truncate(MAX_LINE_BYTES);
-                    let suffix = b"... [line truncated at 1MB]";
-                    let start = MAX_LINE_BYTES - suffix.len();
-                    buf[start..].copy_from_slice(suffix);
-                }
+            // OOM safety rail (both modes): hard-cap a single pathological line.
+            if buf.len() > MAX_LINE_BYTES {
+                buf.truncate(MAX_LINE_BYTES);
+                let suffix = b"... [line truncated at 1MB]";
+                let start = MAX_LINE_BYTES - suffix.len();
+                buf[start..].copy_from_slice(suffix);
             }
-            Some(buf.as_slice())
+
+            Some(raw_len)
         }
         Err(_) => None, // I/O error = treat as EOF
     }
@@ -198,6 +236,10 @@ pub fn run_captured(
 
     let (mut child, mut reader) = spawn_merged(cmd)?;
 
+    // Publish the child's process-group id so the parent's signal handlers and
+    // the watchdog can target the whole subtree. pgid == pid (own group).
+    CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
+
     // Reusable line buffer for read_line_bytes
     let mut line_buf: Vec<u8> = Vec::with_capacity(4096);
 
@@ -208,8 +250,18 @@ pub fn run_captured(
 
     let mut all_lines: Vec<String> = Vec::new();
     let mut raw_capped = false;
+    // Retain enough tail lines while streaming to serve BOTH a successful exit
+    // (show `tail_cap`) and a failing exit (show the larger `tail_error_cap`),
+    // since the tail cannot be expanded retroactively. Also retain enough to show
+    // every line below `threshold` (the documented "no truncation" promise),
+    // bounded so a huge --threshold cannot exhaust memory.
+    let retain_tail = tail_cap.max(tail_error_cap).max(
+        threshold
+            .saturating_sub(head_cap)
+            .min(RETAIN_COMPLETENESS_CAP),
+    );
     let mut pipeline = if !raw_mode {
-        Some(FilterPipeline::new(head_cap, tail_cap, only_errors))
+        Some(FilterPipeline::new(head_cap, retain_tail, only_errors))
     } else {
         None
     };
@@ -232,10 +284,19 @@ pub fn run_captured(
                 let elapsed = start.elapsed().as_millis() as u64;
                 let last = last_output_time_clone.load(Ordering::Relaxed);
                 if elapsed.saturating_sub(last) > timeout_ms {
-                    let _ = std::process::Command::new("kill")
-                        .arg("-9")
-                        .arg(child_id.to_string())
-                        .status();
+                    // Kill the whole child process group, not just the `sh` wrapper,
+                    // so pipelines/grandchildren can't keep the stdout pipe open and
+                    // deadlock the read loop.
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(child_id as i32), libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/T", "/PID", &child_id.to_string()])
+                            .status();
+                    }
                     return true;
                 }
             }
@@ -244,15 +305,18 @@ pub fn run_captured(
         None
     };
 
-    while let Some(line_bytes) = read_line_bytes(&mut reader, &mut line_buf) {
+    // In --raw mode we read verbatim (no destructive transforms); otherwise we
+    // clean each line for LLM consumption. `raw_len` is the true pre-transform
+    // byte count, which keeps `bytes_raw` honest.
+    while let Some(raw_len) = read_line_bytes(&mut reader, &mut line_buf, !raw_mode) {
         if idle_timeout > 0 {
             last_output_time.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
         }
-        raw_bytes_total += line_bytes.len() + 1;
+        raw_bytes_total += raw_len;
 
         // Binary detection on first ~8KB
         if first_chunk.len() < 8192 {
-            first_chunk.extend_from_slice(line_bytes);
+            first_chunk.extend_from_slice(&line_buf);
             first_chunk.push(b'\n');
             if filter::looks_binary(&first_chunk) {
                 is_binary = true;
@@ -267,10 +331,10 @@ pub fn run_captured(
                 // Keep draining but don't store (so child doesn't block)
                 continue;
             }
-            let stripped = filter::strip_ansi(line_bytes);
+            let stripped = filter::strip_ansi(&line_buf);
             all_lines.push(stripped.into_owned());
         } else {
-            let stripped = filter::strip_ansi(line_bytes);
+            let stripped = filter::strip_ansi(&line_buf);
             if let Some(ref mut pipe) = pipeline {
                 pipe.feed(stripped);
             }
@@ -297,19 +361,34 @@ pub fn run_captured(
 
     // Wait for child to finish
     let status: ExitStatus = child.wait()?;
+    // Child reaped: stop forwarding signals to a defunct group.
+    CHILD_PGID.store(0, Ordering::SeqCst);
     let exit_code = exit_code_from_status(status);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     if is_binary {
-        // Binary output: passthrough, no filtering
+        // Binary output: we deliberately do NOT forward the full stream to the LLM
+        // (it would be both useless and token-expensive). We show the first ~8 KB
+        // we sniffed and, when the stream was larger, an explicit banner — instead
+        // of silently emitting a truncated blob that looks like the whole output.
+        let shown_bytes = first_chunk.len();
+        let mut output = String::from_utf8_lossy(&first_chunk).into_owned();
+        let truncated = raw_bytes_total > shown_bytes;
+        if truncated {
+            output.push_str(&format!(
+                "\n... [l0-cache: binary output detected — showing first {} of {} bytes] ...\n",
+                shown_bytes, raw_bytes_total
+            ));
+        }
+        let bytes_final = output.len();
         return Ok(RunResult {
             filter_result: FilterResult {
-                output: String::from_utf8_lossy(&first_chunk).into_owned(),
+                output,
                 lines_raw: 0,
                 lines_final: 0,
                 bytes_raw: raw_bytes_total,
-                bytes_final: raw_bytes_total,
-                truncated: false,
+                bytes_final,
+                truncated,
             },
             exit_code,
             duration_ms,
@@ -348,13 +427,16 @@ pub fn run_captured(
             strategy: "raw",
         })
     } else {
-        let mut pipe = pipeline.unwrap();
-        // If error exit, expand tail
-        if exit_code != 0 {
-            pipe.expand_tail(tail_error_cap);
-        }
+        let pipe = pipeline.unwrap();
+        // Show the success tail on exit 0, the (larger) error tail otherwise.
+        // The buffer retained `retain_tail` lines, so this trims, never expands.
+        let display_tail = if exit_code == 0 {
+            tail_cap
+        } else {
+            tail_error_cap
+        };
 
-        let mut filter_result = pipe.finish(threshold, raw_bytes_total);
+        let mut filter_result = pipe.finish(threshold, raw_bytes_total, display_tail);
         if killed_by_watchdog {
             let msg = format!("\n... [l0-cache: Command killed due to {}s output inactivity. Is it waiting for interactive input?] ...\n", idle_timeout);
             filter_result.output.push_str(&msg);
@@ -373,6 +455,12 @@ pub fn run_captured(
 
 /// Run a command in passthrough mode: inherit all stdio, no capture.
 pub fn run_passthrough(cmd: &[String]) -> std::io::Result<i32> {
+    if cmd.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no command to execute",
+        ));
+    }
     let status = Command::new(&cmd[0])
         .args(&cmd[1..])
         .stdin(Stdio::inherit())
@@ -484,14 +572,23 @@ mod tests {
 
     // ── read_line_bytes tests ──────────────────────────────────────────
 
+    /// Test adapter: read one transformed (filtered-mode) line, returning its
+    /// content slice (or None at EOF) so existing assertions stay readable.
+    fn rl<'a>(reader: &mut BufReader<impl Read>, buf: &'a mut Vec<u8>) -> Option<&'a [u8]> {
+        match read_line_bytes(reader, buf, true) {
+            Some(_) => Some(buf.as_slice()),
+            None => None,
+        }
+    }
+
     #[test]
     fn read_line_bytes_normal() {
         let data = b"hello\nworld\n";
         let mut reader = BufReader::new(&data[..]);
         let mut buf = Vec::new();
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), Some(&b"hello"[..]));
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), Some(&b"world"[..]));
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), None);
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b"hello"[..]));
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b"world"[..]));
+        assert_eq!(rl(&mut reader, &mut buf), None);
     }
 
     #[test]
@@ -499,11 +596,8 @@ mod tests {
         let data = b"windows\r\nline\r\n";
         let mut reader = BufReader::new(&data[..]);
         let mut buf = Vec::new();
-        assert_eq!(
-            read_line_bytes(&mut reader, &mut buf),
-            Some(&b"windows"[..])
-        );
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), Some(&b"line"[..]));
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b"windows"[..]));
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b"line"[..]));
     }
 
     #[test]
@@ -511,11 +605,8 @@ mod tests {
         let data = b"no newline";
         let mut reader = BufReader::new(&data[..]);
         let mut buf = Vec::new();
-        assert_eq!(
-            read_line_bytes(&mut reader, &mut buf),
-            Some(&b"no newline"[..])
-        );
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), None);
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b"no newline"[..]));
+        assert_eq!(rl(&mut reader, &mut buf), None);
     }
 
     #[test]
@@ -523,7 +614,7 @@ mod tests {
         let mut buf = Vec::new();
         let data = b"";
         let mut reader = BufReader::new(&data[..]);
-        let res = read_line_bytes(&mut reader, &mut buf);
+        let res = rl(&mut reader, &mut buf);
         assert_eq!(res, None);
     }
 
@@ -533,7 +624,7 @@ mod tests {
         // Simulates: "Downloading... 10%\rDownloading... 50%\rDownloading... 100%\n"
         let data = b"Downloading... 10%\rDownloading... 50%\rDownloading... 100%\n";
         let mut reader = BufReader::new(&data[..]);
-        let res = read_line_bytes(&mut reader, &mut buf);
+        let res = rl(&mut reader, &mut buf);
         assert_eq!(res.unwrap(), b"Downloading... 100%");
     }
 
@@ -543,7 +634,7 @@ mod tests {
         // "foo\x07bar\x08baz\n" -> "foobabaz"
         let data = b"foo\x07bar\x08baz\n";
         let mut reader = BufReader::new(&data[..]);
-        let res = read_line_bytes(&mut reader, &mut buf);
+        let res = rl(&mut reader, &mut buf);
         assert_eq!(res.unwrap(), b"foobabaz");
     }
 
@@ -553,7 +644,7 @@ mod tests {
         // "hello \xF0\x9F\x9A\x80\x08world\n" -> "hello world" (rocket emoji followed by backspace)
         let data = b"hello \xF0\x9F\x9A\x80\x08world\n";
         let mut reader = BufReader::new(&data[..]);
-        let res = read_line_bytes(&mut reader, &mut buf);
+        let res = rl(&mut reader, &mut buf);
         assert_eq!(res.unwrap(), b"hello world");
     }
 
@@ -562,10 +653,52 @@ mod tests {
         let data = b"\n\n\n";
         let mut reader = BufReader::new(&data[..]);
         let mut buf = Vec::new();
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), Some(&b""[..]));
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), Some(&b""[..]));
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), Some(&b""[..]));
-        assert_eq!(read_line_bytes(&mut reader, &mut buf), None);
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b""[..]));
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b""[..]));
+        assert_eq!(rl(&mut reader, &mut buf), Some(&b""[..]));
+        assert_eq!(rl(&mut reader, &mut buf), None);
+    }
+
+    #[test]
+    fn read_line_bytes_returns_true_raw_len() {
+        // raw_len reflects the OS bytes incl. terminator, BEFORE any transform.
+        let data = b"abc\ndef\r\n";
+        let mut reader = BufReader::new(&data[..]);
+        let mut buf = Vec::new();
+        assert_eq!(read_line_bytes(&mut reader, &mut buf, true), Some(4)); // "abc\n"
+        assert_eq!(&buf[..], b"abc");
+        assert_eq!(read_line_bytes(&mut reader, &mut buf, true), Some(5)); // "def\r\n"
+        assert_eq!(&buf[..], b"def");
+        assert_eq!(read_line_bytes(&mut reader, &mut buf, true), None);
+    }
+
+    #[test]
+    fn read_line_bytes_raw_mode_is_verbatim() {
+        // A >2000B JSON line is truncated in filtered mode, kept in raw mode.
+        let mut payload = vec![b'{'];
+        payload.extend(std::iter::repeat_n(b'a', 3000));
+        payload.push(b'\n');
+
+        let mut bf = Vec::new();
+        read_line_bytes(&mut BufReader::new(&payload[..]), &mut bf, true).unwrap();
+        assert!(bf.len() < 3000, "filtered mode should truncate big JSON");
+
+        let mut br = Vec::new();
+        read_line_bytes(&mut BufReader::new(&payload[..]), &mut br, false).unwrap();
+        assert_eq!(
+            br.len(),
+            3001,
+            "raw mode must keep JSON verbatim (1 '{{' + 3000 'a')"
+        );
+
+        // Interior carriage returns: squashed in filtered, preserved in raw.
+        let data = b"a\rb\n";
+        let mut cf = Vec::new();
+        read_line_bytes(&mut BufReader::new(&data[..]), &mut cf, true).unwrap();
+        assert_eq!(&cf[..], b"b");
+        let mut cr = Vec::new();
+        read_line_bytes(&mut BufReader::new(&data[..]), &mut cr, false).unwrap();
+        assert_eq!(&cr[..], b"a\rb");
     }
 
     // ── exit_code_from_status tests ────────────────────────────────────

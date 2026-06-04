@@ -12,6 +12,20 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod datetime;
+mod guard;
+
+// Date/time helpers used by metrics, stats, and rotation housekeeping.
+use datetime::{parse_rfc3339_to_secs, parse_since, rfc3339_now};
+// Safety guard — re-exported so `main` can reach `telemetry::{...}`.
+pub use guard::{check_dangerous_command, guard_enabled};
+// Brought into scope so the in-module `#[cfg(test)] mod tests` (which uses
+// `super::*`) can reach these test-only helpers.
+#[cfg(test)]
+use datetime::to_rfc3339;
+#[cfg(test)]
+use guard::{is_critical_target, normalize_guard_path, parse_bool_env};
+
 struct FileLock {
     path: PathBuf,
     acquired: bool,
@@ -81,11 +95,6 @@ pub struct ExecutionMetric {
     pub version: String,
 }
 
-/// Token divisor: bytes / DIVISOR ≈ token count.
-/// 4 is a reasonable approximation for English/code text on most LLM tokenizers.
-#[allow(dead_code)]
-const TOKEN_DIVISOR: usize = 4;
-
 /// Inputs for building an execution metric.
 pub struct RunMetrics<'a> {
     pub cmd: &'a str,
@@ -101,8 +110,9 @@ pub struct RunMetrics<'a> {
 }
 
 impl ExecutionMetric {
-    /// Create a metric from run results with default token divisor.
-    #[allow(dead_code)]
+    /// Create a metric from run results with the default token divisor.
+    /// Test-only convenience; production passes an explicit `--token-factor`.
+    #[cfg(test)]
     pub fn from_run(m: RunMetrics<'_>) -> Self {
         Self::from_run_with_factor(m, 4)
     }
@@ -274,20 +284,44 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
                         }
                     }
 
-                    if let Ok(mut file) = OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&old)
-                    {
+                    // Size cap: if age-pruning alone still leaves the file above the
+                    // rotation target (e.g. a heavy user generating >10 MB within 30
+                    // days), keep only the most-recent lines that fit in half the max.
+                    // Without this, an all-recent oversized file would re-rotate (and
+                    // rewrite itself in full) on EVERY subsequent invocation.
+                    let target = (METRICS_MAX_BYTES / 2) as usize;
+                    let mut start = kept_lines.len();
+                    let mut budget = target;
+                    for i in (0..kept_lines.len()).rev() {
+                        let needed = kept_lines[i].len() + 1; // line + '\n'
+                        if needed > budget {
+                            break;
+                        }
+                        budget -= needed;
+                        start = i;
+                    }
+                    let kept_lines = &kept_lines[start..];
+
+                    // Write the pruned history back into the ACTIVE file (`path`),
+                    // not the rotated-away copy — otherwise `print_stats` and
+                    // `get_adaptive_params` would see an empty file after every
+                    // rotation. The new metric is then appended below.
+                    let rotate_open = {
+                        let mut opts = OpenOptions::new();
+                        opts.create(true).write(true).truncate(true);
                         #[cfg(unix)]
                         {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+                            use std::os::unix::fs::OpenOptionsExt;
+                            opts.mode(0o600);
                         }
+                        opts.open(&path)
+                    };
+                    if let Ok(mut file) = rotate_open {
                         for line in kept_lines {
                             let _ = writeln!(file, "{}", line);
                         }
+                        // History preserved in `path`; discard the rotated copy.
+                        let _ = fs::remove_file(&old);
                     }
                 }
             }
@@ -306,10 +340,21 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
     };
     line.push('\n');
 
-    // Append atomically (O_APPEND)
-    match OpenOptions::new().create(true).append(true).open(&path) {
+    // Append atomically (O_APPEND). Create new files 0600 via the open mode so
+    // there is no window where the file is world-readable before a chmod.
+    let open_result = {
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&path)
+    };
+    match open_result {
         Ok(mut file) => {
-            // Set restrictive permissions on Unix (0600 = owner read/write only)
+            // Fix up a pre-existing file's perms (open mode only applies on create).
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -334,25 +379,6 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
 }
 
 // ── Stats Command ───────────────────────────────────────────────────────────
-
-/// Parse a duration string like "7d", "24h", "30m" into seconds.
-fn parse_since(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let mut chars = s.chars();
-    let unit = chars.next_back()?;
-    let num_str = chars.as_str();
-    let num: u64 = num_str.parse().ok()?;
-    match unit {
-        'd' => Some(num * 86400),
-        'h' => Some(num * 3600),
-        'm' => Some(num * 60),
-        's' => Some(num),
-        _ => None,
-    }
-}
 
 /// Aggregated stats for a single command.
 #[derive(Debug)]
@@ -415,12 +441,12 @@ pub fn print_stats(since: Option<&str>) {
             Err(_) => continue, // skip malformed lines
         };
 
-        // Apply time filter
+        // Apply time filter (fail-closed: a missing/unparseable timestamp is
+        // excluded from a windowed query rather than silently counted).
         if let Some(cutoff_time) = cutoff {
-            if let Some(ts_secs) = parse_rfc3339_to_secs(&metric.ts) {
-                if ts_secs < cutoff_time {
-                    continue;
-                }
+            match parse_rfc3339_to_secs(&metric.ts) {
+                Some(ts_secs) if ts_secs >= cutoff_time => {}
+                _ => continue,
             }
         }
 
@@ -514,8 +540,10 @@ pub fn print_stats(since: Option<&str>) {
             "·".repeat(empty)
         );
 
-        let cmd_disp = if cmd.len() > 23 {
-            format!("{}…", &cmd[..22])
+        // Char-boundary safe: the metrics file is externally writable, so a
+        // command name whose 22nd byte falls mid-codepoint must not panic.
+        let cmd_disp = if cmd.chars().count() > 23 {
+            format!("{}…", cmd.chars().take(22).collect::<String>())
         } else {
             cmd.to_string()
         };
@@ -714,14 +742,17 @@ pub fn run_doctor() {
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let mode = meta.permissions().mode();
-                    let owner_read_write = (mode & 0o777) == 0o600;
-                    if owner_read_write {
+                    // Secure as long as no group/other access (0400, 0440-as-owner,
+                    // 0600 all qualify); only group/world bits are a concern.
+                    let no_group_or_world = (mode & 0o077) == 0;
+                    if no_group_or_world {
                         println!(
-                            "  \x1b[32m✔ [OK]\x1b[0m Metrics file exists with secure permissions (0600)."
+                            "  \x1b[32m✔ [OK]\x1b[0m Metrics file exists with secure permissions ({:03o}, no group/world access).",
+                            mode & 0o777
                         );
                         ok_count += 1;
                     } else {
-                        println!("  \x1b[33m⚠ [WARN]\x1b[0m Metrics file permissions are insecure: {:o} (expected 0600).", mode & 0o777);
+                        println!("  \x1b[33m⚠ [WARN]\x1b[0m Metrics file permissions are insecure: {:o} (group/world access; expected 0600).", mode & 0o777);
                         println!(
                             "     To secure it, run: chmod 600 {}",
                             metrics_file.display()
@@ -813,19 +844,7 @@ pub fn run_doctor() {
 
     // 5. Safety Command Guard Check
     println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m5. Safety Command Guard Status\x1b[0m");
-    let guard_active = if std::env::var("L0_CACHE_GUARD")
-        .map(|v| v == "0")
-        .unwrap_or(false)
-    {
-        false
-    } else if std::env::var("L0_CACHE_GUARD")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        true
-    } else {
-        is_llm_environment()
-    };
+    let guard_active = guard_enabled(false, false);
     if guard_active {
         println!("  \x1b[32m● [ACTIVE]\x1b[0m Safety Guard is active. Destructive/exfiltrating commands will be blocked.");
         ok_count += 1;
@@ -871,158 +890,6 @@ fn format_number(n: usize) -> String {
     }
 }
 
-/// Get current UTC time in RFC3339 format.
-fn rfc3339_now() -> String {
-    let now = std::time::SystemTime::now();
-    let duration = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    to_rfc3339(duration.as_secs())
-}
-
-/// Format a Unix timestamp (seconds since epoch) as UTC RFC3339: `YYYY-MM-DDTHH:MM:SSZ`.
-fn to_rfc3339(secs: u64) -> String {
-    const SECS_PER_DAY: u64 = 86400;
-    const SECS_PER_HOUR: u64 = 3600;
-    const SECS_PER_MINUTE: u64 = 60;
-
-    let days = secs / SECS_PER_DAY;
-    let secs_of_day = secs % SECS_PER_DAY;
-
-    let mut year = 1970;
-    let mut days_left = days;
-
-    loop {
-        let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-        let days_in_year = if is_leap { 366 } else { 365 };
-        if days_left < days_in_year {
-            break;
-        }
-        days_left -= days_in_year;
-        year += 1;
-    }
-
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    let month_days = if is_leap {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month = 1;
-    for &d in &month_days {
-        if days_left < d {
-            break;
-        }
-        days_left -= d;
-        month += 1;
-    }
-
-    let day = days_left + 1;
-    let hour = secs_of_day / SECS_PER_HOUR;
-    let minute = (secs_of_day % SECS_PER_HOUR) / SECS_PER_MINUTE;
-    let second = secs_of_day % SECS_PER_MINUTE;
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, minute, second
-    )
-}
-
-/// Parse a UTC or offset RFC3339 timestamp into a Unix timestamp (seconds since epoch).
-fn parse_rfc3339_to_secs(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if !s.is_ascii() {
-        return None;
-    }
-    if s.len() < 19 {
-        return None;
-    }
-    let year: u64 = s[0..4].parse().ok()?;
-    if s.chars().nth(4)? != '-' {
-        return None;
-    }
-    let month: u64 = s[5..7].parse().ok()?;
-    if s.chars().nth(7)? != '-' {
-        return None;
-    }
-    let day: u64 = s[8..10].parse().ok()?;
-    if s.chars().nth(10)? != 'T' {
-        return None;
-    }
-    let hour: u64 = s[11..13].parse().ok()?;
-    if s.chars().nth(13)? != ':' {
-        return None;
-    }
-    let minute: u64 = s[14..16].parse().ok()?;
-    if s.chars().nth(16)? != ':' {
-        return None;
-    }
-    let second: u64 = s[17..19].parse().ok()?;
-
-    let mut tz_char = 'Z';
-    let mut tz_idx = s.len();
-    for (i, c) in s.char_indices().skip(19) {
-        if c == 'Z' || c == '+' || c == '-' {
-            tz_char = c;
-            tz_idx = i;
-            break;
-        }
-    }
-
-    let mut days = 0u64;
-    for y in 1970..year {
-        let is_leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
-        days += if is_leap { 366 } else { 365 };
-    }
-
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    let month_days = if is_leap {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    if !(1..=12).contains(&month) {
-        return None;
-    }
-    for m in 1..month {
-        days += month_days[m as usize - 1];
-    }
-    if !(1..=month_days[month as usize - 1]).contains(&day) {
-        return None;
-    }
-    days += day - 1;
-
-    let mut total_secs = days * 86400 + hour * 3600 + minute * 60 + second;
-
-    if tz_char == '+' || tz_char == '-' {
-        let offset_str = &s[tz_idx + 1..];
-        let parts: Vec<&str> = offset_str.split(':').collect();
-        let off_hour: u64;
-        let mut off_min: u64 = 0;
-        if parts.len() == 2 {
-            off_hour = parts[0].parse().ok()?;
-            off_min = parts[1].parse().ok()?;
-        } else if offset_str.len() == 4 {
-            off_hour = offset_str[0..2].parse().ok()?;
-            off_min = offset_str[2..4].parse().ok()?;
-        } else if offset_str.len() == 2 {
-            off_hour = offset_str.parse().ok()?;
-        } else {
-            return None;
-        }
-        let offset_secs = off_hour * 3600 + off_min * 60;
-        if tz_char == '+' {
-            total_secs = total_secs.checked_sub(offset_secs)?;
-        } else {
-            total_secs = total_secs.checked_add(offset_secs)?;
-        }
-    }
-
-    Some(total_secs)
-}
-
 /// Adaptive parameters computed via historical command executions.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AdaptiveParams {
@@ -1031,6 +898,32 @@ pub struct AdaptiveParams {
     pub tail_error: usize,
     pub modified: bool,
     pub reason: Option<String>,
+}
+
+/// How many bytes from the end of the metrics file `get_adaptive_params` reads.
+/// Adaptive tuning only needs the last few matching entries, so reading the whole
+/// (up to 10 MB) file on every wrapped command is wasteful; the tail is enough.
+const ADAPTIVE_READ_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Read up to `max_bytes` from the END of a file as (lossy) UTF-8, dropping the
+/// partial first line when the read started mid-file. Returns `None` on I/O error.
+fn read_tail_lossy(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let mut s = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0 {
+        if let Some(nl) = s.find('\n') {
+            s.drain(..=nl); // discard the (possibly partial) first line
+        }
+    }
+    Some(s)
 }
 
 /// Analyze historical metrics to compute tuned head/tail parameters.
@@ -1065,9 +958,9 @@ pub fn get_adaptive_params(
         };
     }
 
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => {
+    let content = match read_tail_lossy(&path, ADAPTIVE_READ_TAIL_BYTES) {
+        Some(c) => c,
+        None => {
             return AdaptiveParams {
                 head: default_head,
                 tail: default_tail,
@@ -1095,8 +988,9 @@ const DECAY_FACTOR_MODERATE_NUM: usize = 80;
 const DECAY_FACTOR_STRONG_NUM: usize = 60;
 const DECAY_FACTOR_DENOM: usize = 100;
 
-/// Analyze metrics log content to compute tuned parameters.
-#[allow(dead_code)]
+/// Analyze metrics log content to compute tuned parameters with default limits.
+/// Test-only; production calls `_with_limits` with the configured floor/ceiling.
+#[cfg(test)]
 fn get_adaptive_params_from_content(
     content: &str,
     cmd_name: &str,
@@ -1242,126 +1136,6 @@ fn get_adaptive_params_from_content_with_limits(
         modified: false,
         reason: None,
     }
-}
-
-/// Detects if the current process is running inside an active LLM editor environment.
-pub fn is_llm_environment() -> bool {
-    if std::env::var("CLAUDE_CODE").is_ok() || std::env::var("GEMINI_CLI").is_ok() {
-        return true;
-    }
-    if let Ok(term_prog) = std::env::var("TERM_PROGRAM") {
-        let tp = term_prog.to_lowercase();
-        if tp.contains("vscode") || tp.contains("cursor") {
-            return true;
-        }
-    }
-    if std::env::var("VSCODE_GIT_IPC_HANDLE").is_ok() || std::env::var("VSCODE_PORT").is_ok() {
-        return true;
-    }
-    false
-}
-
-/// Evaluates a command name and arguments against dangerous pattern rules (system destruction, reverse shell, exfiltration).
-pub fn check_dangerous_command(cmd_name: &str, command: &[String]) -> Result<(), String> {
-    let cmd_lower = cmd_name.to_lowercase();
-
-    // Convert all arguments to a single lowercase string for scanning
-    let full_args: Vec<String> = command.iter().map(|s| s.to_lowercase()).collect();
-    let full_command_str = full_args.join(" ");
-
-    // 1. Destructive rm check
-    if cmd_lower == "rm" || cmd_lower.ends_with("/rm") {
-        let has_recursive = full_args
-            .iter()
-            .any(|arg| arg.starts_with('-') && (arg.contains('r') || arg.contains('R')));
-        let has_force = full_args
-            .iter()
-            .any(|arg| arg.starts_with('-') && arg.contains('f'))
-            || full_args.contains(&"--force".to_string());
-
-        if has_recursive && has_force {
-            // Check for critical system paths
-            let critical_paths = [
-                "/", "/*", "/etc", "/etc/*", "/var", "/var/*", "/usr", "/usr/*", "/boot",
-                "/boot/*", "/dev", "/dev/*", "/sys", "/sys/*", "/proc", "/proc/*", "/lib",
-                "/lib/*", "/lib64", "/lib64/*", "/bin", "/bin/*", "/sbin", "/sbin/*",
-            ];
-            for path in &critical_paths {
-                if full_args.iter().any(|arg| arg == path) {
-                    return Err(format!(
-                        "Destructive system-level removal detected: 'rm' recursively targeted critical path '{}'",
-                        path
-                    ));
-                }
-            }
-        }
-    }
-
-    // 2. Reverse shells & TCP redirections
-    if full_command_str.contains("/dev/tcp/") || full_command_str.contains("/dev/udp/") {
-        return Err(
-            "Unauthorized network socket redirection detected (/dev/tcp or /dev/udp)".to_string(),
-        );
-    }
-
-    // 3. Exfiltration check (curl/wget/nc combined with sensitive files)
-    let is_network_utility = ["curl", "wget", "nc", "netcat", "telnet", "ssh"]
-        .iter()
-        .any(|&u| cmd_lower == u || cmd_lower.ends_with(&format!("/{}", u)));
-
-    if is_network_utility {
-        // Exfiltration targets
-        let sensitive_patterns = [
-            "id_rsa",
-            "id_ed25519",
-            ".env",
-            "master.key",
-            "passwd",
-            "shadow",
-            "credentials",
-        ];
-
-        // Data payload flags
-        let has_payload_flag = full_args.iter().any(|arg| {
-            arg == "-d"
-                || arg.starts_with("--data")
-                || arg == "-f"
-                || arg.starts_with("--form")
-                || arg == "-t"
-                || arg == "--upload-file"
-                || arg.starts_with("--post-file")
-                || arg.starts_with("--post-data")
-        });
-
-        // Or input redirection in case of nc
-        let has_redirection = full_command_str.contains('<') || full_command_str.contains('|');
-
-        if has_payload_flag || has_redirection || cmd_lower == "ssh" {
-            for pattern in &sensitive_patterns {
-                if full_command_str.contains(pattern) {
-                    return Err(format!(
-                        "Potential credentials exfiltration: network utility '{}' invoked with sensitive target '{}'",
-                        cmd_name, pattern
-                    ));
-                }
-            }
-        }
-    }
-
-    // 4. Obvious destructive SQL drops palesi
-    if (cmd_lower == "sqlite3"
-        || cmd_lower == "mysql"
-        || cmd_lower == "psql"
-        || cmd_lower == "sqlcmd")
-        && full_command_str.contains("drop database")
-    {
-        return Err(format!(
-            "Destructive SQL command blocked: database drop query detected in '{}'",
-            cmd_name
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2032,6 +1806,33 @@ mod tests {
     }
 
     #[test]
+    fn test_read_tail_lossy() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "l0-tail-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let content: String = (0..1000).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(&p, &content).unwrap();
+
+        // Small tail: must include the last line, exclude the first, and begin at a
+        // line boundary (the partial first line is dropped).
+        let tail = read_tail_lossy(&p, 50).unwrap();
+        assert!(tail.contains("line 999"));
+        assert!(!tail.contains("line 0\n"));
+        assert!(tail.starts_with("line "));
+
+        // When the cap exceeds the file size, the whole file is returned verbatim.
+        let all = read_tail_lossy(&p, 10_000_000).unwrap();
+        assert_eq!(all, content);
+
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn test_guard_rm_dangerous() {
         // Dangerous rm should fail
         let command = vec!["rm".to_string(), "-rf".to_string(), "/".to_string()];
@@ -2096,5 +1897,86 @@ mod tests {
             "SELECT * FROM users;".to_string(),
         ];
         assert!(check_dangerous_command("sqlite3", &command_safe).is_ok());
+    }
+
+    #[test]
+    fn test_guard_rm_path_normalization() {
+        // Trailing slash, doubled slash, and trailing "/." must all be caught.
+        for path in ["/etc/", "/etc//", "/etc/.", "/", "/*", "/etc/*", "'/etc/'"] {
+            let cmd = vec!["rm".to_string(), "-rf".to_string(), path.to_string()];
+            assert!(
+                check_dangerous_command("rm", &cmd).is_err(),
+                "rm -rf {path} should be blocked"
+            );
+        }
+        // Benign relative targets must NOT be blocked.
+        for path in ["target", "./target/", "build/", "/home/user/project"] {
+            let cmd = vec!["rm".to_string(), "-rf".to_string(), path.to_string()];
+            assert!(
+                check_dangerous_command("rm", &cmd).is_ok(),
+                "rm -rf {path} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_guard_shell_wrapped_rm() {
+        // The dominant LLM-agent pattern: `bash -c "rm -rf /etc"` must be blocked
+        // even though the outer argv is just [bash, -c, "<payload>"].
+        let cmd = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "rm -rf /etc".to_string(),
+        ];
+        assert!(check_dangerous_command("rm", &cmd).is_err());
+
+        // Chained inside the payload, with a trailing slash.
+        let cmd2 = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo hi && rm -rf /etc/".to_string(),
+        ];
+        assert!(check_dangerous_command("echo", &cmd2).is_err());
+
+        // A benign shell payload must still pass.
+        let safe = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "cargo build && rm -rf target".to_string(),
+        ];
+        assert!(check_dangerous_command("cargo", &safe).is_ok());
+    }
+
+    #[test]
+    fn test_parse_bool_env() {
+        for v in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert_eq!(parse_bool_env(v), Some(true), "{v:?} should be truthy");
+        }
+        for v in ["0", "false", "no", "off", ""] {
+            assert_eq!(parse_bool_env(v), Some(false), "{v:?} should be falsy");
+        }
+        assert_eq!(parse_bool_env("banana"), None);
+    }
+
+    #[test]
+    fn test_guard_enabled_flags() {
+        // Explicit flags take precedence over everything (and over each other:
+        // force_off wins), without consulting the environment.
+        assert!(!guard_enabled(false, true)); // --no-guard
+        assert!(guard_enabled(true, false)); // --guard
+        assert!(!guard_enabled(true, true)); // both → off wins
+    }
+
+    #[test]
+    fn test_normalize_guard_path() {
+        assert_eq!(normalize_guard_path("/etc/"), "/etc");
+        assert_eq!(normalize_guard_path("/etc//"), "/etc");
+        assert_eq!(normalize_guard_path("/etc/."), "/etc");
+        assert_eq!(normalize_guard_path("//etc"), "/etc");
+        assert_eq!(normalize_guard_path("'/etc'"), "/etc");
+        assert_eq!(normalize_guard_path("/"), "/");
+        assert!(is_critical_target("/etc/*"));
+        assert!(is_critical_target("/*"));
+        assert!(!is_critical_target("target/"));
     }
 }
