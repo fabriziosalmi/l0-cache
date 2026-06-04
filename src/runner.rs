@@ -110,7 +110,69 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Read one line from the reader into `buf` (newline stripped).
+/// Read one line's bytes into `buf`, but NEVER buffer more than `MAX_LINE_BYTES`.
+///
+/// Unlike `BufRead::read_until`, which would allocate the entire line before any
+/// cap could apply, this reads in chunks via `fill_buf`/`consume`: once the kept
+/// content reaches the cap, the rest of the line is read and DISCARDED (still
+/// counted), so a pathological newline-free stream — a minified bundle, a
+/// `tr '\0' a` flood — cannot blow up memory. The trailing `\n` is consumed but
+/// not stored.
+///
+/// Returns `Some((raw_len, capped))`: `raw_len` is the true number of bytes the OS
+/// produced for this line including the terminator (feeds an accurate `bytes_raw`);
+/// `capped` is true if the line exceeded the cap. Returns `None` only at EOF.
+fn read_line_capped(reader: &mut BufReader<impl Read>, buf: &mut Vec<u8>) -> Option<(usize, bool)> {
+    buf.clear();
+    let mut raw_len = 0usize;
+    let mut capped = false;
+    let mut saw_any = false;
+    loop {
+        // Inspect the buffered chunk and copy into `buf` here; end the borrow
+        // before calling `consume` (which needs &mut reader).
+        let (consumed, found_nl) = {
+            let chunk = match reader.fill_buf() {
+                Ok(c) => c,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    return if saw_any {
+                        Some((raw_len, capped))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if chunk.is_empty() {
+                return if saw_any {
+                    Some((raw_len, capped))
+                } else {
+                    None
+                };
+            }
+            saw_any = true;
+
+            let nl = chunk.iter().position(|&b| b == b'\n');
+            let take = nl.unwrap_or(chunk.len()); // bytes of this line in the chunk
+            let room = MAX_LINE_BYTES.saturating_sub(buf.len());
+            let keep = room.min(take);
+            buf.extend_from_slice(&chunk[..keep]);
+            if keep < take {
+                capped = true; // dropped the rest of this line (kept counting)
+            }
+            match nl {
+                Some(i) => (i + 1, true), // include the newline in the consume count
+                None => (take, false),
+            }
+        };
+        raw_len += consumed;
+        reader.consume(consumed);
+        if found_nl {
+            return Some((raw_len, capped));
+        }
+    }
+}
+
+/// Read one line from the reader into `buf` (newline stripped), memory-bounded.
 ///
 /// Returns `Some(raw_len)` where `raw_len` is the number of bytes the OS actually
 /// produced for this line (including the line terminator), measured BEFORE any
@@ -127,80 +189,72 @@ fn read_line_bytes(
     buf: &mut Vec<u8>,
     transform: bool,
 ) -> Option<usize> {
-    buf.clear();
-    match reader.read_until(b'\n', buf) {
-        Ok(0) => None, // EOF
-        Ok(raw_len) => {
-            // Line framing (both modes): remove trailing newline (and \r for \r\n).
-            if buf.last() == Some(&b'\n') {
-                buf.pop();
-            }
-            if buf.last() == Some(&b'\r') {
-                buf.pop(); // handle \r\n (Windows line endings from SSH etc.)
-            }
+    let (raw_len, capped) = read_line_capped(reader, buf)?;
 
-            if transform {
-                // --- 80/20 Progress Bar Squashing ---
-                // If the buffer still contains '\r' (interior carriage returns), it means
-                // the command updated the same line multiple times (e.g. progress bars).
-                // Emulate terminal behavior by keeping only the part *after* the last '\r'.
-                if let Some(last_r) = buf.iter().rposition(|&b| b == b'\r') {
-                    let keep_len = buf.len() - (last_r + 1);
-                    buf.copy_within(last_r + 1.., 0);
-                    buf.truncate(keep_len);
-                }
+    // Line framing: the newline is already excluded; strip a trailing \r (\r\n).
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
 
-                // --- 80/20 Backspace and Bell Resolution ---
-                if buf.contains(&0x08) || buf.contains(&0x7f) || buf.contains(&0x07) {
-                    let mut write_idx = 0;
-                    for read_idx in 0..buf.len() {
-                        let b = buf[read_idx];
-                        if b == 0x08 || b == 0x7f {
-                            // Backspace or DEL: remove previous byte if possible
-                            if write_idx > 0 {
-                                write_idx -= 1;
-                                // Basic UTF-8 continuation byte skip:
-                                while write_idx > 0 && (buf[write_idx] & 0xC0) == 0x80 {
-                                    write_idx -= 1;
-                                }
-                            }
-                        } else if b == 0x07 {
-                            // Terminal Bell: ignore completely
-                            continue;
-                        } else {
-                            buf[write_idx] = b;
-                            write_idx += 1;
+    let mut json_truncated = false;
+    if transform {
+        // --- 80/20 Progress Bar Squashing ---
+        // If the buffer still contains '\r' (interior carriage returns), it means
+        // the command updated the same line multiple times (e.g. progress bars).
+        // Emulate terminal behavior by keeping only the part *after* the last '\r'.
+        if let Some(last_r) = buf.iter().rposition(|&b| b == b'\r') {
+            let keep_len = buf.len() - (last_r + 1);
+            buf.copy_within(last_r + 1.., 0);
+            buf.truncate(keep_len);
+        }
+
+        // --- 80/20 Backspace and Bell Resolution ---
+        if buf.contains(&0x08) || buf.contains(&0x7f) || buf.contains(&0x07) {
+            let mut write_idx = 0;
+            for read_idx in 0..buf.len() {
+                let b = buf[read_idx];
+                if b == 0x08 || b == 0x7f {
+                    // Backspace or DEL: remove previous byte if possible
+                    if write_idx > 0 {
+                        write_idx -= 1;
+                        // Basic UTF-8 continuation byte skip:
+                        while write_idx > 0 && (buf[write_idx] & 0xC0) == 0x80 {
+                            write_idx -= 1;
                         }
                     }
-                    buf.truncate(write_idx);
-                }
-
-                // --- 80/20 JSON Smart Truncation (Token Shield) ---
-                // If the line is large (> 2000 bytes) and looks like JSON, aggressively
-                // truncate it to spare the LLM a massive single-line JSON payload.
-                // This is destructive, so it is filtered-mode only (never in --raw).
-                if buf.len() > 2000 {
-                    let first_non_whitespace = buf.iter().find(|&&b| b != b' ' && b != b'\t');
-                    let is_json = matches!(first_non_whitespace, Some(&b'{') | Some(&b'['));
-                    if is_json {
-                        buf.truncate(2000);
-                        buf.extend_from_slice(b"\n... [Large JSON Payload Truncated for LLM] ...");
-                    }
+                } else if b == 0x07 {
+                    // Terminal Bell: ignore completely
+                    continue;
+                } else {
+                    buf[write_idx] = b;
+                    write_idx += 1;
                 }
             }
-
-            // OOM safety rail (both modes): hard-cap a single pathological line.
-            if buf.len() > MAX_LINE_BYTES {
-                buf.truncate(MAX_LINE_BYTES);
-                let suffix = b"... [line truncated at 1MB]";
-                let start = MAX_LINE_BYTES - suffix.len();
-                buf[start..].copy_from_slice(suffix);
-            }
-
-            Some(raw_len)
+            buf.truncate(write_idx);
         }
-        Err(_) => None, // I/O error = treat as EOF
+
+        // --- 80/20 JSON Smart Truncation (Token Shield) ---
+        // If the line is large (> 2000 bytes) and looks like JSON, aggressively
+        // truncate it to spare the LLM a massive single-line JSON payload.
+        // This is destructive, so it is filtered-mode only (never in --raw).
+        if buf.len() > 2000 {
+            let first_non_whitespace = buf.iter().find(|&&b| b != b' ' && b != b'\t');
+            let is_json = matches!(first_non_whitespace, Some(&b'{') | Some(&b'['));
+            if is_json {
+                buf.truncate(2000);
+                buf.extend_from_slice(b"\n... [Large JSON Payload Truncated for LLM] ...");
+                json_truncated = true;
+            }
+        }
     }
+
+    // The line hit the 1 MB cap and its tail was drained — say so (unless JSON
+    // truncation already replaced the content with its own marker).
+    if capped && !json_truncated {
+        buf.extend_from_slice(b"... [line truncated at 1MB]");
+    }
+
+    Some(raw_len)
 }
 
 /// Extract exit code from ExitStatus, using POSIX 128+N convention for signals.
@@ -699,6 +753,45 @@ mod tests {
         let mut cr = Vec::new();
         read_line_bytes(&mut BufReader::new(&data[..]), &mut cr, false).unwrap();
         assert_eq!(&cr[..], b"a\rb");
+    }
+
+    #[test]
+    fn read_line_bytes_caps_giant_newline_free_line() {
+        // A 5 MB single "line" with no newline must NOT be buffered whole: `buf`
+        // stays ~1 MB, raw_len reports the true size, and a marker is appended.
+        let big = vec![b'a'; 5 * 1024 * 1024];
+        let mut reader = BufReader::new(&big[..]);
+        let mut buf = Vec::new();
+        let raw = read_line_bytes(&mut reader, &mut buf, true).unwrap();
+        assert_eq!(
+            raw,
+            5 * 1024 * 1024,
+            "raw_len must reflect the true byte count"
+        );
+        assert!(
+            buf.len() <= MAX_LINE_BYTES + 64,
+            "buf must stay bounded (~1MB), got {}",
+            buf.len()
+        );
+        assert!(buf.starts_with(b"aaaa"));
+        assert!(String::from_utf8_lossy(&buf).ends_with("[line truncated at 1MB]"));
+        assert_eq!(read_line_bytes(&mut reader, &mut buf, true), None);
+    }
+
+    #[test]
+    fn read_line_bytes_cap_does_not_eat_the_next_line() {
+        // Giant line, then a normal one: capping the first must not consume the second.
+        let mut data = vec![b'x'; 2 * 1024 * 1024];
+        data.push(b'\n');
+        data.extend_from_slice(b"second\n");
+        let mut reader = BufReader::new(&data[..]);
+        let mut buf = Vec::new();
+        let raw1 = read_line_bytes(&mut reader, &mut buf, true).unwrap();
+        assert_eq!(raw1, 2 * 1024 * 1024 + 1);
+        assert!(buf.len() <= MAX_LINE_BYTES + 64);
+        let raw2 = read_line_bytes(&mut reader, &mut buf, true).unwrap();
+        assert_eq!(raw2, 7); // "second\n"
+        assert_eq!(&buf[..], b"second");
     }
 
     // ── exit_code_from_status tests ────────────────────────────────────
