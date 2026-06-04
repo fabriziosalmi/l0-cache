@@ -30,6 +30,20 @@ pub fn strip_ansi(input: &[u8]) -> Cow<'_, str> {
     }
 }
 
+/// Case-insensitive ASCII substring search that does not allocate.
+/// `needle` is expected to be lowercase ASCII. Used on the hot path instead of
+/// `line.to_lowercase().contains(..)`, which allocated a String for every line.
+fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    let (hb, nb) = (haystack.as_bytes(), needle.as_bytes());
+    if nb.is_empty() {
+        return true;
+    }
+    if hb.len() < nb.len() {
+        return false;
+    }
+    (0..=hb.len() - nb.len()).any(|i| hb[i..i + nb.len()].eq_ignore_ascii_case(nb))
+}
+
 // ── Line Collapse (Identical + Prefix-based) ────────────────────────────────
 
 const MIN_PREFIX_LEN: usize = 2;
@@ -127,6 +141,12 @@ pub struct CollapseLines {
     run_prefix: Option<String>,
 }
 
+impl Default for CollapseLines {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CollapseLines {
     pub fn new() -> Self {
         Self {
@@ -205,8 +225,16 @@ impl CollapseLines {
             let count = self.repeat_count;
             self.repeat_count = 0;
             self.last_line = None;
-            self.run_prefix = None;
-            let prefix = prefix_with_indent(&first).unwrap_or(&first);
+            // Show the meaningful (timestamp-skipped) prefix with the original
+            // indentation, e.g. "  Compiling ... (×N)" or "[INFO] ... (×N)" rather
+            // than collapsing onto the leading timestamp token.
+            let prefix = match self.run_prefix.take() {
+                Some(word) => {
+                    let indent = &first[..first.len() - first.trim_start().len()];
+                    format!("{}{}", indent, word)
+                }
+                None => prefix_with_indent(&first).unwrap_or(&first).to_string(),
+            };
             Some(format!("{} ... (×{})", prefix, count))
         } else if let Some(line) = self.last_line.take() {
             let count = self.repeat_count;
@@ -229,6 +257,12 @@ pub struct WhitespaceSqueeze {
     consecutive_blanks: usize,
 }
 
+impl Default for WhitespaceSqueeze {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WhitespaceSqueeze {
     pub fn new() -> Self {
         Self {
@@ -236,8 +270,9 @@ impl WhitespaceSqueeze {
         }
     }
 
-    /// Feed a line. Returns `Some(line)` if the line should be emitted.
-    #[allow(dead_code)]
+    /// Feed a borrowed line. Returns `Some(line)` if it should be emitted.
+    /// Test-only; production uses [`Self::feed_owned`].
+    #[cfg(test)]
     pub fn feed<'a>(&mut self, line: &'a str) -> Option<&'a str> {
         if line.trim().is_empty() {
             self.consecutive_blanks += 1;
@@ -434,22 +469,20 @@ impl FilterPipeline {
     /// Feed a raw line (already ANSI-stripped). Applies collapse + squeeze + buffer.
     /// Uses Cow to avoid cloning through the pipeline.
     pub fn feed(&mut self, line: Cow<'_, str>) {
-        let line_lower = if self.only_errors || !self.auto_tuned {
-            line.to_lowercase()
-        } else {
-            String::new()
-        };
-
         // --- 80/20 only_errors Filter ---
         if self.only_errors {
-            let is_error = line_lower.contains("error")
-                || line_lower.contains("warn")
-                || line_lower.contains("fail")
-                || line_lower.contains("exception")
-                || line_lower.contains("panic")
-                || line_lower.contains("traceback")
-                || line_lower.contains("fatal");
-
+            let l = line.as_ref();
+            let is_error = [
+                "error",
+                "warn",
+                "fail",
+                "exception",
+                "panic",
+                "traceback",
+                "fatal",
+            ]
+            .iter()
+            .any(|kw| contains_ascii_ci(l, kw));
             if !is_error {
                 return;
             }
@@ -460,15 +493,16 @@ impl FilterPipeline {
         // The tail is already sized to retain a large error window (see runner),
         // so we only need to decide how much HEAD to keep.
         if !self.auto_tuned {
-            if line_lower.contains("traceback (most recent call last)")
-                || line_lower.contains("panicked at")
+            let l = line.as_ref();
+            if contains_ascii_ci(l, "traceback (most recent call last)")
+                || contains_ascii_ci(l, "panicked at")
             {
                 // Python/Rust: the useful context (the actual error) is at the bottom.
                 // Keep far fewer head lines and let the tail carry the trace.
                 let new_head = (self.buffer.head_cap / 5).max(3); // ~20%, floor 3
                 self.buffer.rebalance_head(new_head);
                 self.auto_tuned = true;
-            } else if line_lower.contains("exception in thread") {
+            } else if contains_ascii_ci(l, "exception in thread") {
                 // Java: the exception header is at the TOP; the existing head already
                 // captures it. Nothing to rebalance — just stop re-checking.
                 self.auto_tuned = true;
@@ -1204,6 +1238,15 @@ mod tests {
     }
 
     // ── Additional binary detection tests ───────────────────────────────
+
+    #[test]
+    fn contains_ascii_ci_works() {
+        assert!(contains_ascii_ci("Build FAILED with ERROR", "error"));
+        assert!(contains_ascii_ci("thread panicked AT", "panicked at"));
+        assert!(contains_ascii_ci("anything", ""));
+        assert!(!contains_ascii_ci("all good here", "panic"));
+        assert!(!contains_ascii_ci("hi", "longer than haystack"));
+    }
 
     #[test]
     fn binary_empty_input() {

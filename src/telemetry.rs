@@ -81,11 +81,6 @@ pub struct ExecutionMetric {
     pub version: String,
 }
 
-/// Token divisor: bytes / DIVISOR ≈ token count.
-/// 4 is a reasonable approximation for English/code text on most LLM tokenizers.
-#[allow(dead_code)]
-const TOKEN_DIVISOR: usize = 4;
-
 /// Inputs for building an execution metric.
 pub struct RunMetrics<'a> {
     pub cmd: &'a str,
@@ -101,8 +96,9 @@ pub struct RunMetrics<'a> {
 }
 
 impl ExecutionMetric {
-    /// Create a metric from run results with default token divisor.
-    #[allow(dead_code)]
+    /// Create a metric from run results with the default token divisor.
+    /// Test-only convenience; production passes an explicit `--token-factor`.
+    #[cfg(test)]
     pub fn from_run(m: RunMetrics<'_>) -> Self {
         Self::from_run_with_factor(m, 4)
     }
@@ -1061,6 +1057,32 @@ pub struct AdaptiveParams {
     pub reason: Option<String>,
 }
 
+/// How many bytes from the end of the metrics file `get_adaptive_params` reads.
+/// Adaptive tuning only needs the last few matching entries, so reading the whole
+/// (up to 10 MB) file on every wrapped command is wasteful; the tail is enough.
+const ADAPTIVE_READ_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Read up to `max_bytes` from the END of a file as (lossy) UTF-8, dropping the
+/// partial first line when the read started mid-file. Returns `None` on I/O error.
+fn read_tail_lossy(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let mut s = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0 {
+        if let Some(nl) = s.find('\n') {
+            s.drain(..=nl); // discard the (possibly partial) first line
+        }
+    }
+    Some(s)
+}
+
 /// Analyze historical metrics to compute tuned head/tail parameters.
 pub fn get_adaptive_params(
     cmd_name: &str,
@@ -1093,9 +1115,9 @@ pub fn get_adaptive_params(
         };
     }
 
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => {
+    let content = match read_tail_lossy(&path, ADAPTIVE_READ_TAIL_BYTES) {
+        Some(c) => c,
+        None => {
             return AdaptiveParams {
                 head: default_head,
                 tail: default_tail,
@@ -1123,8 +1145,9 @@ const DECAY_FACTOR_MODERATE_NUM: usize = 80;
 const DECAY_FACTOR_STRONG_NUM: usize = 60;
 const DECAY_FACTOR_DENOM: usize = 100;
 
-/// Analyze metrics log content to compute tuned parameters.
-#[allow(dead_code)]
+/// Analyze metrics log content to compute tuned parameters with default limits.
+/// Test-only; production calls `_with_limits` with the configured floor/ceiling.
+#[cfg(test)]
 fn get_adaptive_params_from_content(
     content: &str,
     cmd_name: &str,
@@ -2166,6 +2189,33 @@ mod tests {
 
         // Clean up parent directory
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_read_tail_lossy() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "l0-tail-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let content: String = (0..1000).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(&p, &content).unwrap();
+
+        // Small tail: must include the last line, exclude the first, and begin at a
+        // line boundary (the partial first line is dropped).
+        let tail = read_tail_lossy(&p, 50).unwrap();
+        assert!(tail.contains("line 999"));
+        assert!(!tail.contains("line 0\n"));
+        assert!(tail.starts_with("line "));
+
+        // When the cap exceeds the file size, the whole file is returned verbatim.
+        let all = read_tail_lossy(&p, 10_000_000).unwrap();
+        assert_eq!(all, content);
+
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

@@ -455,6 +455,12 @@ pub fn run_captured(
 
 /// Run a command in passthrough mode: inherit all stdio, no capture.
 pub fn run_passthrough(cmd: &[String]) -> std::io::Result<i32> {
+    if cmd.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no command to execute",
+        ));
+    }
     let status = Command::new(&cmd[0])
         .args(&cmd[1..])
         .stdin(Stdio::inherit())

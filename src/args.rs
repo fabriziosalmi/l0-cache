@@ -14,8 +14,8 @@ use clap_complete::Shell;
     version,
     long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("L0_CACHE_GIT_HASH"), ")"),
     about = "CLI proxy: filters & truncates command output to save LLM tokens",
-    // Allow unknown args so we can pass them to the child command
-    trailing_var_arg = true,
+    // `trailing_var_arg` is set on the `command` field below; everything after the
+    // first non-flag token is the child command.
 )]
 pub struct Args {
     /// Show aggregated token savings statistics, then exit.
@@ -54,8 +54,9 @@ pub struct Args {
     #[arg(long, default_value_t = crate::filter::DEFAULT_THRESHOLD)]
     pub threshold: usize,
 
-    /// Enable adaptive auto-tuning (now enabled by default).
-    #[arg(long)]
+    /// Deprecated no-op: auto-tuning is on by default (disable with `--no-auto`).
+    /// Kept (hidden) for backward compatibility.
+    #[arg(long, hide = true)]
     pub auto: bool,
 
     /// Disable adaptive auto-tuning of parameters.

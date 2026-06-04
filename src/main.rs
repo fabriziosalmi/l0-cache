@@ -91,7 +91,7 @@ fn main() {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("l0-cache: failed to execute '{}': {}", args.cmd_name(), e);
-                std::process::exit(127);
+                std::process::exit(exec_error_code(&e));
             }
         }
     }
@@ -136,22 +136,14 @@ fn main() {
             let mut output_to_write = result.filter_result.output.clone();
 
             if result.filter_result.truncated && result.strategy == "head_tail" {
+                // The mid-output "... [N lines omitted for LLM] ..." marker (from the
+                // filter) already states the gap; this footer adds only run metadata
+                // and the head/tail summary, so the omitted count is not repeated.
                 let head_cap = head;
                 let tail_cap = if result.exit_code == 0 {
                     tail
                 } else {
                     tail_error
-                };
-                let _savings_pct = if result.filter_result.bytes_raw > 0 {
-                    (result
-                        .filter_result
-                        .bytes_raw
-                        .saturating_sub(result.filter_result.bytes_final)
-                        as f64
-                        / result.filter_result.bytes_raw as f64)
-                        * 100.0
-                } else {
-                    0.0
                 };
                 let separator = if output_to_write.is_empty() || output_to_write.ends_with('\n') {
                     ""
@@ -159,11 +151,10 @@ fn main() {
                     "\n"
                 };
                 let banner = format!(
-                    "{}\n... [l0-cache: exit_code={}, duration={}ms, truncated=true, {} lines omitted] ...\n... [Showing {} head + {} tail of {} lines] ...\n",
+                    "{}\n... [l0-cache: exit_code={}, duration={}ms, truncated=true] ...\n... [Showing {} head + {} tail of {} lines] ...\n",
                     separator,
                     result.exit_code,
                     result.duration_ms,
-                    result.filter_result.lines_raw.saturating_sub(head_cap + tail_cap),
                     head_cap,
                     tail_cap,
                     result.filter_result.lines_raw
@@ -201,8 +192,19 @@ fn main() {
         }
         Err(e) => {
             eprintln!("l0-cache: failed to execute '{}': {}", args.cmd_name(), e);
-            std::process::exit(127);
+            std::process::exit(exec_error_code(&e));
         }
+    }
+}
+
+/// Map a spawn/execution I/O error to a POSIX-flavored exit code:
+/// 127 when the command (or `/bin/sh`) was not found, 126 for any other failure
+/// to execute it. Reserves 127 for its conventional "not found" meaning.
+fn exec_error_code(e: &std::io::Error) -> i32 {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        127
+    } else {
+        126
     }
 }
 

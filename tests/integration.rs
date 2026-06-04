@@ -287,3 +287,233 @@ fn test_quiet_flag_suppresses_warnings() {
 
     let _ = std::fs::remove_dir_all(temp_dir);
 }
+
+/// A unique, isolated `XDG_DATA_HOME` temp dir for metrics-touching tests.
+fn temp_xdg(tag: &str) -> PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!(
+        "l0-cache-it-{}-{}",
+        tag,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn tail_error_shows_more_tail_than_success() {
+    // The headline behavior: on a non-zero exit the tail window is the larger
+    // error tail; on success it's the small tail. This must hold on STDOUT, not
+    // just in a stderr notice. (Regression guard for the old expand_tail no-op.)
+    let t = get_t_bin();
+    let xdg = temp_xdg("tailerr");
+
+    let fail = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--no-auto", "sh", "-c", "seq 1 500; exit 1"])
+        .output()
+        .unwrap();
+    let fail_out = String::from_utf8_lossy(&fail.stdout);
+    // Error tail is 120 lines → line 400 (well past the 30-line success tail) is shown.
+    assert!(
+        fail_out.lines().any(|l| l == "400"),
+        "error tail should reach ~120 deep (line 400 missing)"
+    );
+    assert!(fail_out.lines().any(|l| l == "500"));
+
+    let ok = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--no-auto", "sh", "-c", "seq 1 500; exit 0"])
+        .output()
+        .unwrap();
+    let ok_out = String::from_utf8_lossy(&ok.stdout);
+    // Success tail is 30 lines → line 400 must NOT appear, but 500 (last) does.
+    assert!(
+        !ok_out.lines().any(|l| l == "400"),
+        "success tail should be small (line 400 should not appear)"
+    );
+    assert!(ok_out.lines().any(|l| l == "500"));
+
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn raw_mode_keeps_all_lines_and_no_json_truncation() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("raw");
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--raw", "seq", "1", "5000"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.lines().any(|l| l == "1"));
+    assert!(s.lines().any(|l| l == "2500"));
+    assert!(s.lines().any(|l| l == "5000"));
+    assert!(!s.contains("omitted for LLM"), "raw must not truncate");
+
+    // A big single-line JSON payload is kept verbatim in --raw.
+    let json = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args([
+            "--raw",
+            "sh",
+            "-c",
+            "printf '{'; for i in $(seq 1 3000); do printf a; done; printf '}\\n'",
+        ])
+        .output()
+        .unwrap();
+    let js = String::from_utf8_lossy(&json.stdout);
+    assert!(!js.contains("Large JSON Payload Truncated"));
+    assert!(js.trim().len() >= 3000);
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn binary_output_carries_explicit_banner() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("bin");
+    let child = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["sh", "-c", "head -c 200000 /dev/urandom"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let out = child.wait_with_output().expect("wait");
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Never silently forward the whole 200 KB blob.
+    assert!(
+        out.stdout.len() < 200_000,
+        "binary should not be passed through whole"
+    );
+    assert!(
+        s.contains("binary output detected"),
+        "binary output should carry an explicit banner"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_timeout_kills_hung_command() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("idle");
+    let start = Instant::now();
+    let child = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--idle-timeout", "1", "sh", "-c", "sleep 8 | cat"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let _ = wait_timeout(child, Duration::from_secs(5)).expect("idle-timeout did not fire");
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "watchdog should kill the command within ~1-2s, took {:?}",
+        start.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigterm_is_forwarded_and_propagated() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("term");
+    let child = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["sh", "-c", "sleep 30"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+    // Give it a moment to spawn the child group, then SIGTERM the proxy.
+    thread::sleep(Duration::from_millis(500));
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .status();
+    let status =
+        wait_timeout(child, Duration::from_secs(5)).expect("proxy did not exit after SIGTERM");
+    // 128 + SIGTERM(15) = 143
+    assert_eq!(
+        status.code(),
+        Some(143),
+        "proxy should propagate SIGTERM as 143"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn concurrent_metric_writers_do_not_corrupt_the_log() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("conc");
+    let n = 16;
+    let mut kids = Vec::new();
+    for i in 0..n {
+        kids.push(
+            Command::new(&t)
+                .env("XDG_DATA_HOME", &xdg)
+                .env("L0_CACHE_GUARD", "0")
+                .args(["--no-auto", "echo", &format!("run{}", i)])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn"),
+        );
+    }
+    for k in kids {
+        let _ = wait_timeout(k, Duration::from_secs(10));
+    }
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let content = std::fs::read_to_string(&metrics).expect("metrics file");
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        n,
+        "every concurrent run should append exactly one line"
+    );
+    for l in &lines {
+        assert!(
+            l.starts_with('{') && l.ends_with('}'),
+            "interleaved/corrupted JSONL line: {l}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn stats_renders_with_seeded_metrics() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("stats");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("metrics.jsonl"),
+        "{\"ts\":\"2026-06-04T10:00:00Z\",\"cmd\":\"cargo\",\"tokens_saved\":900,\"tokens_raw\":1000}\n\
+         {\"ts\":\"2026-06-04T10:01:00Z\",\"cmd\":\"git\",\"tokens_saved\":100,\"tokens_raw\":400}\n",
+    )
+    .unwrap();
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .arg("--stats")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("cargo"));
+    assert!(s.contains("Total Runs"));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
