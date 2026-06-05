@@ -10,6 +10,10 @@ filtering, truncating, and compressing command output. Designed for AI coding
 assistants (Claude Code, Gemini CLI, Cursor) running on macOS, Linux, and
 remote servers.
 
+<p align="center">
+  <img src="docs/public/screenshot.png" alt="l0-cache --stats telemetry dashboard" width="513">
+</p>
+
 ## The Problem
 
 AI coding assistants read the full output of every shell command. A single

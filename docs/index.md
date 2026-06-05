@@ -5,6 +5,9 @@ hero:
   name: l0-cache
   text: CLI proxy for LLM token savings
   tagline: Reduce AI coding assistant token consumption by 50-80% with a single command prefix.
+  image:
+    src: /screenshot.png
+    alt: l0-cache --stats telemetry dashboard
   actions:
     - theme: brand
       text: Get Started
