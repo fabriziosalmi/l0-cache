@@ -592,3 +592,53 @@ fn stats_renders_with_seeded_metrics() {
     );
     let _ = std::fs::remove_dir_all(&xdg);
 }
+
+#[test]
+fn stats_json_is_machine_readable() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("statsjson");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("metrics.jsonl"),
+        "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"tokens_saved\":900,\"tokens_raw\":1000}\n",
+    )
+    .unwrap();
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json", "--cost-per-mtok", "3"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(!s.contains('\x1b'), "json output must be plain");
+    assert!(s.contains("\"total_runs\""));
+    assert!(s.contains("\"usd_saved\""));
+    assert!(s.contains("\"command\": \"cargo\""));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn discover_lists_commands() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("discover");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("metrics.jsonl"),
+        "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"tokens_saved\":900,\"tokens_raw\":1000}\n",
+    )
+    .unwrap();
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .arg("--discover")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("optimization advisor"));
+    assert!(s.contains("cargo"));
+    let _ = std::fs::remove_dir_all(&xdg);
+}

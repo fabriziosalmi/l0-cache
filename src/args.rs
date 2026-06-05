@@ -22,13 +22,25 @@ pub struct Args {
     #[arg(long)]
     pub stats: bool,
 
-    /// Filter stats to entries within this time window (e.g. "7d", "24h").
-    #[arg(long, requires = "stats")]
+    /// Filter stats/discover to entries within this time window (e.g. "7d", "24h").
+    #[arg(long)]
     pub since: Option<String>,
 
     /// Reset (delete) all telemetry statistics.
     #[arg(long)]
     pub reset_stats: bool,
+
+    /// Show an optimization advisory derived from your metrics, then exit.
+    #[arg(long)]
+    pub discover: bool,
+
+    /// Output `--stats` as JSON instead of the dashboard.
+    #[arg(long)]
+    pub json: bool,
+
+    /// USD per million tokens; when > 0, show estimated cost saved in `--stats`/`--discover`.
+    #[arg(long, default_value_t = 0.0)]
+    pub cost_per_mtok: f64,
 
     /// Run command but print full output without truncation (still logs metrics).
     #[arg(long)]

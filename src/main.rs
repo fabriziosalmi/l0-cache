@@ -46,7 +46,13 @@ fn main() {
 
     // ── Stats mode ──────────────────────────────────────────────────────
     if args.stats {
-        telemetry::print_stats(args.since.as_deref());
+        telemetry::print_stats(args.since.as_deref(), args.json, args.cost_per_mtok);
+        std::process::exit(0);
+    }
+
+    // ── Discover mode (optimization advisory) ───────────────────────────
+    if args.discover {
+        telemetry::run_discover(args.since.as_deref(), args.cost_per_mtok);
         std::process::exit(0);
     }
 

@@ -388,25 +388,48 @@ struct CmdStats {
     tokens_raw_total: usize,
 }
 
-/// Print aggregated stats from the metrics file.
-pub fn print_stats(since: Option<&str>) {
+/// Metrics aggregated and sorted by tokens saved (desc), ready to render.
+struct StatsAgg {
+    path: PathBuf,
+    total_runs: usize,
+    total_saved: usize,
+    total_raw: usize,
+    by_cmd: Vec<(String, CmdStats)>,
+}
+
+/// Outcome of reading the metrics file for a stats/discover query.
+enum StatsData {
+    NoDataDir,
+    NoFile(PathBuf),
+    Empty,
+    Ready(StatsAgg),
+}
+
+/// Savings percentage of `saved` against `raw` (0 when `raw` is 0).
+fn pct(saved: usize, raw: usize) -> f64 {
+    if raw > 0 {
+        (saved as f64 / raw as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// USD value of `tokens` at `cost_per_mtok` dollars per million tokens.
+fn usd(tokens: usize, cost_per_mtok: f64) -> f64 {
+    (tokens as f64 / 1_000_000.0) * cost_per_mtok
+}
+
+/// Read, parse, and aggregate the metrics file for the `since` window. Shared by
+/// `--stats`, `--stats --json`, and `--discover`.
+fn aggregate_metrics(since: Option<&str>) -> StatsData {
     let path = match metrics_path() {
         Some(p) => p,
-        None => {
-            eprintln!("l0-cache: cannot determine data directory.");
-            eprintln!("   $HOME and $XDG_DATA_HOME are not set, and /etc/passwd lookup failed.");
-            eprintln!("   Set $HOME or $XDG_DATA_HOME to enable metrics.");
-            return;
-        }
+        None => return StatsData::NoDataDir,
     };
-
     if !path.exists() {
-        println!("No metrics found at {}", path.display());
-        println!("Run some commands with `l0-cache` first.");
-        return;
+        return StatsData::NoFile(path);
     }
 
-    // Acquire lock for reading stats
     let lock_path = path.with_extension("jsonl.lock");
     let mut lock = FileLock::new(lock_path);
     let _ = lock.lock(); // best-effort locking
@@ -415,21 +438,19 @@ pub fn print_stats(since: Option<&str>) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("l0-cache: error reading {}: {}", path.display(), e);
-            return;
+            return StatsData::Empty;
         }
     };
 
-    // Parse the time filter
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
     let cutoff = since.and_then(|s| parse_since(s).map(|secs| now_secs.saturating_sub(secs)));
 
     let mut total_runs: usize = 0;
-    let mut total_tokens_saved: usize = 0;
-    let mut total_tokens_raw: usize = 0;
+    let mut total_saved: usize = 0;
+    let mut total_raw: usize = 0;
     let mut by_cmd: std::collections::HashMap<String, CmdStats> = std::collections::HashMap::new();
 
     for line in content.lines() {
@@ -441,8 +462,8 @@ pub fn print_stats(since: Option<&str>) {
             Err(_) => continue, // skip malformed lines
         };
 
-        // Apply time filter (fail-closed: a missing/unparseable timestamp is
-        // excluded from a windowed query rather than silently counted).
+        // Fail-closed time filter: a missing/unparseable timestamp is excluded
+        // from a windowed query rather than silently counted.
         if let Some(cutoff_time) = cutoff {
             match parse_rfc3339_to_secs(&metric.ts) {
                 Some(ts_secs) if ts_secs >= cutoff_time => {}
@@ -451,8 +472,8 @@ pub fn print_stats(since: Option<&str>) {
         }
 
         total_runs += 1;
-        total_tokens_saved += metric.tokens_saved;
-        total_tokens_raw += metric.tokens_raw;
+        total_saved += metric.tokens_saved;
+        total_raw += metric.tokens_raw;
 
         let entry = by_cmd.entry(metric.cmd.clone()).or_insert(CmdStats {
             runs: 0,
@@ -465,15 +486,52 @@ pub fn print_stats(since: Option<&str>) {
     }
 
     if total_runs == 0 {
-        println!("No metrics found for the specified period.");
+        return StatsData::Empty;
+    }
+
+    let mut by_cmd: Vec<(String, CmdStats)> = by_cmd.into_iter().collect();
+    by_cmd.sort_by_key(|(_, s)| std::cmp::Reverse(s.tokens_saved_total));
+
+    StatsData::Ready(StatsAgg {
+        path,
+        total_runs,
+        total_saved,
+        total_raw,
+        by_cmd,
+    })
+}
+
+/// Print aggregated stats from the metrics file.
+pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
+    let agg = match aggregate_metrics(since) {
+        StatsData::NoDataDir => {
+            eprintln!("l0-cache: cannot determine data directory.");
+            eprintln!("   $HOME and $XDG_DATA_HOME are not set, and /etc/passwd lookup failed.");
+            eprintln!("   Set $HOME or $XDG_DATA_HOME to enable metrics.");
+            return;
+        }
+        StatsData::NoFile(p) => {
+            println!("No metrics found at {}", p.display());
+            println!("Run some commands with `l0-cache` first.");
+            return;
+        }
+        StatsData::Empty => {
+            println!("No metrics found for the specified period.");
+            return;
+        }
+        StatsData::Ready(a) => a,
+    };
+
+    if json {
+        print_stats_json(&agg, cost_per_mtok);
         return;
     }
 
-    let avg_pct = if total_tokens_raw > 0 {
-        (total_tokens_saved as f64 / total_tokens_raw as f64) * 100.0
-    } else {
-        0.0
-    };
+    let total_runs = agg.total_runs;
+    let total_tokens_saved = agg.total_saved;
+    let total_tokens_raw = agg.total_raw;
+    let path = &agg.path;
+    let avg_pct = pct(total_tokens_saved, total_tokens_raw);
 
     let ui = crate::ui::Ui::new();
     let period = match since {
@@ -512,12 +570,22 @@ pub fn print_stats(since: Option<&str>) {
         .raw(&gauge, gw);
     println!("{}", ui.box_row(row));
 
+    if cost_per_mtok > 0.0 {
+        let mut row = ui.line();
+        row.paint("38;5;245", "Cost saved")
+            .pad(12)
+            .paint(
+                "32",
+                &format!("${:.2}", usd(total_tokens_saved, cost_per_mtok)),
+            )
+            .paint("38;5;238", &format!("  @ ${:.2}/Mtok", cost_per_mtok));
+        println!("{}", ui.box_row(row));
+    }
+
     println!("{}", ui.box_div());
 
     // ── Per-command table ────────────────────────────────────────────────
-    // Sort by tokens saved descending.
-    let mut sorted: Vec<_> = by_cmd.iter().collect();
-    sorted.sort_by_key(|b| std::cmp::Reverse(b.1.tokens_saved_total));
+    let sorted = &agg.by_cmd; // already sorted by tokens saved (desc)
 
     let mut hdr = ui.line();
     hdr.paint("38;5;245", &format!("{:<10}", "COMMAND"))
@@ -597,6 +665,131 @@ pub fn print_stats(since: Option<&str>) {
         ui.dim("metrics"),
         ui.dim(&path.display().to_string())
     );
+}
+
+/// Emit the aggregated stats as a single JSON object (for tooling / `--json`).
+fn print_stats_json(agg: &StatsAgg, cost_per_mtok: f64) {
+    let round1 = |x: f64| (x * 10.0).round() / 10.0;
+    let round2 = |x: f64| (x * 100.0).round() / 100.0;
+
+    let commands: Vec<serde_json::Value> = agg
+        .by_cmd
+        .iter()
+        .map(|(cmd, s)| {
+            let mut v = serde_json::json!({
+                "command": cmd,
+                "runs": s.runs,
+                "tokens_saved": s.tokens_saved_total,
+                "tokens_raw": s.tokens_raw_total,
+                "efficiency_pct": round1(pct(s.tokens_saved_total, s.tokens_raw_total)),
+            });
+            if cost_per_mtok > 0.0 {
+                v["usd_saved"] =
+                    serde_json::json!(round2(usd(s.tokens_saved_total, cost_per_mtok)));
+            }
+            v
+        })
+        .collect();
+
+    let mut out = serde_json::json!({
+        "total_runs": agg.total_runs,
+        "tokens_saved": agg.total_saved,
+        "tokens_raw": agg.total_raw,
+        "efficiency_pct": round1(pct(agg.total_saved, agg.total_raw)),
+        "commands": commands,
+    });
+    if cost_per_mtok > 0.0 {
+        out["cost_per_mtok"] = serde_json::json!(cost_per_mtok);
+        out["usd_saved"] = serde_json::json!(round2(usd(agg.total_saved, cost_per_mtok)));
+    }
+    println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+}
+
+/// Print an opinionated optimization advisory derived from the metrics: which
+/// prefixed commands are paying off, which to consider dropping, and which carry
+/// the biggest raw-token footprint.
+pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
+    let agg = match aggregate_metrics(since) {
+        StatsData::Ready(a) => a,
+        _ => {
+            println!("No metrics yet — run some commands through `l0-cache` first.");
+            return;
+        }
+    };
+    let ui = crate::ui::Ui::new();
+    let cost = |tokens: usize| -> String {
+        if cost_per_mtok > 0.0 {
+            format!("  [${:.2}]", usd(tokens, cost_per_mtok))
+        } else {
+            String::new()
+        }
+    };
+
+    println!("{}", ui.bold("l0-cache · optimization advisor"));
+    println!();
+
+    // Keep prefixing: meaningful savings, ranked by impact.
+    println!("  {} keep prefixing (paying off)", ui.green("●"));
+    let keep: Vec<_> = agg
+        .by_cmd
+        .iter()
+        .filter(|(_, s)| {
+            s.tokens_saved_total > 0 && pct(s.tokens_saved_total, s.tokens_raw_total) >= 40.0
+        })
+        .take(6)
+        .collect();
+    if keep.is_empty() {
+        println!("    {}", ui.dim("— nothing with ≥40% savings yet"));
+    } else {
+        for (cmd, s) in keep {
+            println!(
+                "    {:<14} {:>4.0}%  {} runs   ~{} saved{}",
+                cmd,
+                pct(s.tokens_saved_total, s.tokens_raw_total),
+                s.runs,
+                format_tokens(s.tokens_saved_total),
+                cost(s.tokens_saved_total),
+            );
+        }
+    }
+    println!();
+
+    // Consider dropping: low savings, run often enough to matter.
+    println!(
+        "  {} consider dropping the prefix (overhead likely exceeds savings)",
+        ui.yellow("●")
+    );
+    let drop: Vec<_> = agg
+        .by_cmd
+        .iter()
+        .filter(|(_, s)| s.runs >= 5 && pct(s.tokens_saved_total, s.tokens_raw_total) < 10.0)
+        .collect();
+    if drop.is_empty() {
+        println!("    {}", ui.dim("— none"));
+    } else {
+        for (cmd, s) in drop {
+            println!(
+                "    {:<14} {:>4.1}%  {} runs",
+                cmd,
+                pct(s.tokens_saved_total, s.tokens_raw_total),
+                s.runs
+            );
+        }
+    }
+    println!();
+
+    // Biggest footprint: most raw tokens seen (the heavy hitters).
+    println!("  {} biggest footprint (most raw tokens)", ui.cyan("●"));
+    let mut by_raw: Vec<_> = agg.by_cmd.iter().collect();
+    by_raw.sort_by_key(|(_, s)| std::cmp::Reverse(s.tokens_raw_total));
+    for (cmd, s) in by_raw.iter().take(3) {
+        println!(
+            "    {:<14} {} raw   {} runs",
+            cmd,
+            format_tokens(s.tokens_raw_total),
+            s.runs
+        );
+    }
 }
 
 /// Diagnoses the l0-cache installation, PATH resolution, shell environment, and active LLM editors.

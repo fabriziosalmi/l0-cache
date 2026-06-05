@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-06-05
+
+### Added
+- **Format-aware diff compression.** A new streaming filter stage collapses long
+  runs of *unchanged context* in unified diffs (keeping file/hunk headers and every
+  `+`/`-` line) to `… (N unchanged diff lines) …`. It activates only after a real
+  `@@ … @@` hunk header, so non-diff output — even indented text — is never touched.
+- **`--discover`** — an optimization advisory from your metrics: which prefixed
+  commands are paying off (keep), which to consider dropping (low savings over
+  enough runs), and the biggest raw-token footprint.
+- **`--json`** — emit `--stats` as a single JSON object (totals + per-command array)
+  for tooling.
+- **`--cost-per-mtok <N>`** — when > 0, show estimated USD cost saved in `--stats`
+  and `--discover` (and `usd_saved` in `--json`).
+- **`agent-rules.sh`** — installs a project rule ("prefix noisy commands with
+  `l0-cache`") for agents whose hook cannot rewrite a command (Cursor, Cline,
+  Copilot, Codex). Best-effort prompt-injection, complementing the transparent
+  `agent-hook.sh` (Claude Code, Gemini CLI).
+- README "How it compares" section positioning l0-cache against rtk / snip / Lean Ctx.
+
 ## [0.1.4] - 2026-06-05
 
 ### Added

@@ -121,8 +121,18 @@ script works for Claude Code.
 
 **Cursor and most other agents** expose a `beforeShellExecution`-style hook that
 can only *approve or block* a command, not rewrite it, so they cannot be wrapped
-transparently. For those, add a line to the agent's rules/instructions file telling
-it to prefix noisy read-only commands with `l0-cache` (e.g. `l0-cache cargo test`).
+transparently. For those, `agent-rules.sh` drops a project rule telling the model
+to prefix noisy read-only commands with `l0-cache`:
+
+```sh
+./agent-rules.sh install cursor   # or: cline | copilot | codex
+./agent-rules.sh print            # just print the snippet to paste anywhere
+./agent-rules.sh remove cursor
+```
+
+This is **best-effort** (the model may ignore it), not a hard hook — it writes a
+project-level rule file (e.g. `.cursor/rules/l0-cache.mdc`,
+`.github/copilot-instructions.md`, `AGENTS.md`).
 
 ## Uninstall
 

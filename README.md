@@ -29,6 +29,7 @@ few lines (headers, command echo) and the last few lines (errors, summary).
 command output
   --> ANSI escape stripping
   --> line collapsing (identical & prefix-based) (×N)
+  --> unified-diff context collapsing (keep changes, drop unchanged runs)
   --> blank line squeezing
   --> head/tail buffering (30 + 30 lines)
   --> metrics logging
@@ -36,6 +37,36 @@ command output
 ```
 
 Typical savings: 50-80% fewer tokens per command invocation.
+
+## How it compares
+
+l0-cache is **universal-first**: it compresses *any* command's output with generic,
+format-aware filters instead of maintaining a parser per tool. That trades some
+best-case ratio on well-known commands for zero per-tool maintenance and instant
+support for unknown/proprietary CLIs. Where it stands apart is the *intelligence
+around* the filtering.
+
+| | l0-cache | [rtk](https://github.com/rtk-ai/rtk) | [snip](https://github.com/edouard-claude/snip) | Lean Ctx |
+|---|---|---|---|---|
+| Filtering | universal + format-aware (head/tail, collapse, diff) | 100+ per-command parsers | 127 YAML filters | MCP server + cache |
+| Works on unknown/custom commands | ✅ | partial | partial | partial |
+| **Adaptive auto-tuning** (by exit code) | ✅ | ❌ | ❌ | ❌ |
+| **Safety guard** (blocks dangerous cmds) | ✅ | ❌ | ❌ | ❌ |
+| Full-output recovery on failure | ✅ `--recover` | ✅ | ❌ | ✅ (cache) |
+| Transparent hook | Claude Code, Gemini CLI | many | many | MCP |
+| Per-command config | JSON | TOML | YAML | — |
+| Stats: dashboard / `--discover` / JSON | ✅ | ✅ | ✅ | partial |
+| New runtime dependencies | none | none | none (Go) | — |
+
+**Uniquely ours:** failure-backoff / success-decay auto-tuning that reacts to exit
+codes, a guard that blocks `rm -rf /` / reverse shells / credential exfiltration /
+`DROP DATABASE`, systematic credential redaction in telemetry, and tested hardening
+(bounded memory, signal/process-group forwarding, OOM caps).
+
+**Where the others win:** deeper per-command semantic output (e.g. grouped test
+failures) and a longer list of pre-wired agents. For maximum ratio on a fixed set
+of known commands, rtk/snip go further; for a safe, adaptive, zero-maintenance proxy
+that works on *everything*, that's l0-cache.
 
 ## Installation
 
@@ -132,7 +163,10 @@ l0-cache --token-factor 8 cargo test
 --auto-ceiling N     Ceiling for failure backoff tail expansion (default: 1000)
 --token-factor N     Divisor for token estimation (default: 4)
 --stats              Show token savings report
---since DURATION     Filter stats (e.g. 7d, 24h, 30m)
+--since DURATION     Filter stats/discover (e.g. 7d, 24h, 30m)
+--discover           Show an optimization advisory (keep / drop / footprint) from metrics
+--json               Output --stats as JSON instead of the dashboard
+--cost-per-mtok N    USD per million tokens; when > 0, show cost saved in --stats/--discover
 --reset-stats        Delete ALL recorded telemetry (destructive, cannot be undone)
 --completions SHELL  Generate shell completions (bash, zsh, fish, elvish, powershell)
 --version            Print version with git commit hash
@@ -245,8 +279,10 @@ conservative, fail-safe wrapper for either (it also enables `--recover`):
 
 > **Cursor** and most other agents expose a hook that can only *allow/deny* a
 > command, not rewrite it, so they cannot be wrapped transparently. For those,
-> add an instruction to the agent's rules file to prefix noisy read-only commands
-> with `l0-cache` (e.g. `l0-cache cargo test`).
+> `agent-rules.sh install cursor|cline|copilot|codex` drops a project rule telling
+> the model to prefix noisy read-only commands with `l0-cache` (or
+> `agent-rules.sh print` to paste it anywhere). This is best-effort (model-dependent),
+> not a hard hook.
 
 ## Safety Guard
 

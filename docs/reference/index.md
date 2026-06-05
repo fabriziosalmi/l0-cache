@@ -73,6 +73,19 @@ Filter the stats report to entries within the given time window.
 Requires `--stats`. Format: `Nd`, `Nh`, `Nm`, `Ns` (e.g. `7d`, `24h`).
 Entries with an unparseable timestamp are excluded from a windowed query.
 
+#### `--discover`
+Print an opinionated optimization advisory from your metrics — which prefixed
+commands are paying off (keep), which to consider dropping (low savings over enough
+runs), and the biggest raw-token footprint — then exit. Honors `--since`.
+
+#### `--json`
+Output `--stats` as a single JSON object (totals + per-command array) instead of the
+dashboard, for tooling.
+
+#### `--cost-per-mtok <N>`
+USD per million tokens. When greater than 0, `--stats` and `--discover` show the
+estimated cost saved (and `usd_saved` appears in `--json`). Default: 0 (hidden).
+
 #### `--reset-stats`
 Delete **all** recorded telemetry (the `metrics.jsonl` file) and exit. This is
 destructive and cannot be undone.

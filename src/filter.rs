@@ -440,10 +440,103 @@ impl HeadTailBuffer {
     }
 }
 
+// ── Unified-diff context collapsing ─────────────────────────────────────────
+
+/// Keep this many context lines at each edge of a long unchanged run.
+const DIFF_CTX_KEEP: usize = 3;
+/// Only collapse a context run longer than this (so short runs stay verbatim).
+const DIFF_CTX_MIN: usize = 8;
+/// Cap on buffered context lines, so a giant hunk can't grow memory unbounded.
+const DIFF_CTX_CAP: usize = 5000;
+
+/// `@@ -a,b +c,d @@` hunk header.
+fn is_hunk_header(l: &str) -> bool {
+    l.starts_with("@@") && l[2..].contains("@@")
+}
+
+/// A line that still belongs to a unified diff (so seeing it does not end the diff).
+fn is_diffish(l: &str) -> bool {
+    matches!(
+        l.as_bytes().first(),
+        Some(b'+' | b'-' | b' ' | b'@' | b'\\')
+    ) || l.starts_with("diff ")
+        || l.starts_with("index ")
+}
+
+/// Streaming, format-aware collapse of *unchanged context* in unified diffs.
+///
+/// It activates only after a real hunk header (`@@ … @@`), so non-diff output —
+/// even indented text whose lines start with a space — is never touched. Within a
+/// diff it keeps the file/hunk headers and every added/removed line, but collapses
+/// long runs of unchanged context lines to `… (N unchanged diff lines) …`, which is
+/// exactly the noise an agent does not need.
+struct DiffCollapse {
+    active: bool,
+    ctx: Vec<String>,
+}
+
+impl DiffCollapse {
+    fn new() -> Self {
+        Self {
+            active: false,
+            ctx: Vec::new(),
+        }
+    }
+
+    fn feed(&mut self, line: String) -> Vec<String> {
+        let mut out = Vec::new();
+        if is_hunk_header(&line) {
+            self.flush_into(&mut out);
+            self.active = true;
+            out.push(line);
+            return out;
+        }
+        if self.active && line.starts_with(' ') {
+            self.ctx.push(line);
+            if self.ctx.len() >= DIFF_CTX_CAP {
+                self.flush_into(&mut out); // bound memory on a pathological hunk
+            }
+            return out;
+        }
+        self.flush_into(&mut out);
+        // A non-diff line ends the diff section, so later text is left alone.
+        if self.active && !is_diffish(&line) {
+            self.active = false;
+        }
+        out.push(line);
+        out
+    }
+
+    fn flush(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.flush_into(&mut out);
+        out
+    }
+
+    fn flush_into(&mut self, out: &mut Vec<String>) {
+        let n = self.ctx.len();
+        if n == 0 {
+            return;
+        }
+        if n <= DIFF_CTX_MIN {
+            out.append(&mut self.ctx);
+            return;
+        }
+        let ctx = std::mem::take(&mut self.ctx);
+        out.extend(ctx[..DIFF_CTX_KEEP].iter().cloned());
+        out.push(format!(
+            " ... ({} unchanged diff lines) ...",
+            n - DIFF_CTX_KEEP * 2
+        ));
+        out.extend(ctx[n - DIFF_CTX_KEEP..].iter().cloned());
+    }
+}
+
 // ── Streaming Filter Pipeline ───────────────────────────────────────────────
 
 /// The full streaming pipeline. Feed lines one by one, then call `finish()`.
 pub struct FilterPipeline {
+    diff: DiffCollapse,
     collapse: CollapseLines,
     squeeze: WhitespaceSqueeze,
     buffer: HeadTailBuffer,
@@ -458,11 +551,21 @@ impl FilterPipeline {
     /// The actual number of tail lines shown is chosen at [`Self::finish`].
     pub fn new(head_cap: usize, tail_cap: usize, only_errors: bool) -> Self {
         Self {
+            diff: DiffCollapse::new(),
             collapse: CollapseLines::new(),
             squeeze: WhitespaceSqueeze::new(),
             buffer: HeadTailBuffer::new(head_cap, tail_cap),
             only_errors,
             auto_tuned: false,
+        }
+    }
+
+    /// Push one already-diff-processed line through collapse → squeeze → buffer.
+    fn push_through(&mut self, line: String) {
+        if let Some(collapsed) = self.collapse.feed(Cow::Owned(line)) {
+            if let Some(squeezed) = self.squeeze.feed_owned(collapsed) {
+                self.buffer.push(squeezed);
+            }
         }
     }
 
@@ -509,13 +612,11 @@ impl FilterPipeline {
             }
         }
 
-        // Step 1: Collapse identical consecutive
-        if let Some(collapsed) = self.collapse.feed(line) {
-            // Step 2: Whitespace squeeze
-            if let Some(squeezed) = self.squeeze.feed_owned(collapsed) {
-                // Step 3: Into head/tail buffer
-                self.buffer.push(squeezed);
-            }
+        // Step 1: Diff-aware context collapsing (one input line may yield several
+        // output lines when a buffered context run is flushed). Step 2: collapse
+        // identical consecutive. Step 3: whitespace squeeze. Step 4: head/tail buffer.
+        for piece in self.diff.feed(line.into_owned()) {
+            self.push_through(piece);
         }
     }
 
@@ -529,7 +630,10 @@ impl FilterPipeline {
         raw_bytes_override: usize,
         display_tail: usize,
     ) -> FilterResult {
-        // Flush the collapse buffer
+        // Flush any pending diff-context run first, then the collapse buffer.
+        for piece in self.diff.flush() {
+            self.push_through(piece);
+        }
         if let Some(last) = self.collapse.flush() {
             if let Some(squeezed) = self.squeeze.feed_owned(last) {
                 self.buffer.push(squeezed);
@@ -1280,5 +1384,73 @@ mod tests {
         // Valid multi-byte UTF-8 (Chinese characters)
         let input = "你好世界 hello 日本語";
         assert!(!looks_binary(input.as_bytes()));
+    }
+
+    // ── DiffCollapse tests ──────────────────────────────────────────────
+
+    fn run_diff(lines: &[&str]) -> Vec<String> {
+        let mut d = DiffCollapse::new();
+        let mut out = Vec::new();
+        for l in lines {
+            out.extend(d.feed((*l).to_string()));
+        }
+        out.extend(d.flush());
+        out
+    }
+
+    #[test]
+    fn diff_collapses_long_unchanged_context() {
+        let mut lines = vec!["@@ -1,30 +1,30 @@".to_string()];
+        for i in 0..20 {
+            lines.push(format!(" ctx_{i}")); // distinct context lines
+        }
+        lines.push("-old".to_string());
+        lines.push("+new".to_string());
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let out = run_diff(&refs);
+        let joined = out.join("\n");
+
+        assert!(joined.contains("unchanged diff lines"), "{joined}");
+        assert!(joined.contains("-old") && joined.contains("+new"));
+        assert!(out.len() < lines.len(), "context should shrink");
+        assert!(joined.contains("ctx_0") && joined.contains("ctx_19")); // edges kept
+        assert!(!joined.contains("ctx_10")); // deep middle dropped
+    }
+
+    #[test]
+    fn diff_keeps_short_context_verbatim() {
+        let out = run_diff(&["@@ -1,3 +1,3 @@", " a", " b", "-x", "+y", " c"]);
+        assert_eq!(out, vec!["@@ -1,3 +1,3 @@", " a", " b", "-x", "+y", " c"]);
+    }
+
+    #[test]
+    fn non_diff_indented_text_is_not_collapsed() {
+        // No hunk header → DiffCollapse stays inactive even for space-led lines.
+        let mut lines = vec!["Build:".to_string()];
+        for i in 0..20 {
+            lines.push(format!("   step {i}"));
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let out = run_diff(&refs);
+        assert_eq!(out.len(), lines.len());
+        assert!(!out.join("\n").contains("unchanged diff"));
+    }
+
+    #[test]
+    fn diff_section_ends_on_non_diff_line() {
+        // After a diff, normal prose with leading spaces must not be collapsed.
+        let mut lines = vec![
+            "@@ -1,1 +1,1 @@".to_string(),
+            "-a".to_string(),
+            "+b".to_string(),
+            "Summary follows:".to_string(), // non-diff line ends the section
+        ];
+        for i in 0..20 {
+            lines.push(format!("   note {i}"));
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let out = run_diff(&refs);
+        assert!(!out.join("\n").contains("unchanged diff"));
+        assert_eq!(out.len(), lines.len());
     }
 }
