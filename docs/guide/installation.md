@@ -1,8 +1,29 @@
 # Installation
 
-## Quick Install (non-interactive)
+## Prebuilt binary (no Rust needed)
 
-Install `l0-cache` locally to `~/.local/bin/` with a single command (requires Git and Rust/Cargo to build):
+Download a prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
+latest GitHub Release and install it to `~/.local/bin/` (with the `t` alias). The
+script verifies the SHA-256 checksum:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install-binary.sh | sh
+```
+
+Override the install dir with `L0_CACHE_BIN_DIR`, or pin a version with
+`L0_CACHE_VERSION=v0.1.8`.
+
+## Homebrew (macOS / Linux)
+
+```sh
+brew tap fabriziosalmi/l0-cache https://github.com/fabriziosalmi/l0-cache
+brew install l0-cache
+```
+
+## From source (non-interactive)
+
+Builds with Rust/Cargo and installs to `~/.local/bin/` (requires Git and a Rust
+toolchain):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install.sh | bash
