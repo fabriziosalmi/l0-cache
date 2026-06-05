@@ -31,25 +31,48 @@ to prioritize recent entries.
 
 ## Config file (optional)
 
-Drop a JSON file at `$XDG_CONFIG_HOME/l0-cache/config.json` (or
-`~/.config/l0-cache/config.json`) to set per-command defaults without recompiling
-and without per-tool parsers:
+Drop a file in `$XDG_CONFIG_HOME/l0-cache/` (or `~/.config/l0-cache/`) to set
+per-command defaults without recompiling and without per-tool parsers. l0-cache
+auto-detects, in this order, `config.{json,toml,yaml,yml,conf,ini}` —
+**transparent multi-format with zero extra dependencies** (JSON is parsed strictly
+by serde; TOML/YAML/INI share a small flat parser, since the schema is flat):
+
+```toml
+# config.toml
+[defaults]
+recover = true
+
+[cargo]
+tail_error = 300
+head = 50
+
+[git]
+head = 10
+tail = 40
+```
+
+The same configuration in JSON or YAML:
 
 ```json
-{
-  "defaults": { "recover": true },
-  "commands": {
-    "cargo":  { "tail_error": 300, "head": 50 },
-    "git":    { "head": 10, "tail": 40 },
-    "docker": { "head": 10, "tail": 80 }
-  }
-}
+{ "defaults": { "recover": true },
+  "commands": { "cargo": { "tail_error": 300, "head": 50 }, "git": { "head": 10, "tail": 40 } } }
+```
+
+```yaml
+defaults:
+  recover: true
+cargo:
+  tail_error: 300
+  head: 50
+git:
+  head: 10
+  tail: 40
 ```
 
 - **Tunable keys** (all optional): `head`, `tail`, `tail_error`, `threshold`,
   `only_errors`, `recover`.
-- **`defaults`** apply to every command; a per-command block in **`commands`**
-  layers on top (command wins field-by-field).
+- A section names a command; **`[defaults]`** (or **`[*]`**) apply to every command,
+  and a per-command section layers on top (command wins field-by-field).
 - Commands are matched by **resolved name**, so `sh -c "cargo test"` matches the
   `cargo` block — the same name used by metrics and auto-tuning.
 - **Precedence**: an explicit CLI flag > config file > built-in default.

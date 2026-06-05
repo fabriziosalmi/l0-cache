@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-06-05
+
+### Added
+- **Transparent multi-format config — still zero new dependencies.** The optional
+  per-command config file is now auto-detected as
+  `config.{json,toml,yaml,yml,conf,ini}` in `$XDG_CONFIG_HOME/l0-cache/` (or
+  `~/.config/l0-cache/`). JSON is parsed strictly via serde; TOML/YAML/INI share a
+  small built-in flat parser (the schema is flat, so all three styles reduce to the
+  same shape). `[*]` is an alias for `[defaults]`; unknown keys and unparseable
+  lines are skipped. No new crates were added.
+
 ## [0.1.6] - 2026-06-05
 
 Hardening pass from a full file-by-file/test-by-test audit.

@@ -72,8 +72,13 @@ fn pipe_to_head() {
 #[test]
 fn integration_banner_appears_when_truncated() {
     let t_bin = get_t_bin();
+    // Isolate metrics + disable auto-tuning so head/tail are exactly 5/5 regardless
+    // of any shared history or parallel `seq` runs.
+    let xdg = temp_xdg("banner-trunc");
     let output = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
         .args([
+            "--no-auto",
             "--head",
             "5",
             "--tail",
@@ -88,13 +93,17 @@ fn integration_banner_appears_when_truncated() {
         .expect("failed to execute l0-cache");
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert!(stdout_str.contains("[Showing 5 head + 5 tail of 100 lines]"));
+    let _ = std::fs::remove_dir_all(&xdg);
 }
 
 #[test]
 fn integration_banner_does_not_appear_when_not_truncated() {
     let t_bin = get_t_bin();
+    let xdg = temp_xdg("banner-notrunc");
     let output = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
         .args([
+            "--no-auto",
             "--head",
             "5",
             "--tail",
@@ -109,6 +118,7 @@ fn integration_banner_does_not_appear_when_not_truncated() {
         .expect("failed to execute l0-cache");
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout_str.contains("truncated=true"));
+    let _ = std::fs::remove_dir_all(&xdg);
 }
 
 #[test]
@@ -701,6 +711,31 @@ fn config_overrides_apply_and_explicit_cli_wins() {
         run(&["--head", "30"]).contains("30 head"),
         "explicit --head 30 (== default) must override config head=7"
     );
+    let _ = std::fs::remove_dir_all(&xdg);
+    let _ = std::fs::remove_dir_all(&cfg);
+}
+
+#[test]
+fn config_toml_is_picked_up_transparently() {
+    // A flat TOML config (no JSON) must be auto-detected and applied.
+    let t = get_t_bin();
+    let xdg = temp_xdg("cfgtoml-data");
+    let cfg = temp_xdg("cfgtoml-conf");
+    std::fs::create_dir_all(cfg.join("l0-cache")).unwrap();
+    std::fs::write(
+        cfg.join("l0-cache").join("config.toml"),
+        "[seq]\nhead = 5\n",
+    )
+    .unwrap();
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("XDG_CONFIG_HOME", &cfg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--no-auto", "seq", "1", "500"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("5 head"), "config.toml head=5 should apply: {s}");
     let _ = std::fs::remove_dir_all(&xdg);
     let _ = std::fs::remove_dir_all(&cfg);
 }

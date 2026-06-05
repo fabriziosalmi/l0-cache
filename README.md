@@ -54,7 +54,7 @@ around* the filtering.
 | **Safety guard** (blocks dangerous cmds) | ✅ | ❌ | ❌ | ❌ |
 | Full-output recovery on failure | ✅ `--recover` | ✅ | ❌ | ✅ (cache) |
 | Transparent hook | Claude Code, Gemini CLI | many | many | MCP |
-| Per-command config | JSON | TOML | YAML | — |
+| Per-command config | JSON / TOML / YAML | TOML | YAML | — |
 | Stats: dashboard / `--discover` / JSON | ✅ | ✅ | ✅ | partial |
 | New runtime dependencies | none | none | none (Go) | — |
 
@@ -198,25 +198,31 @@ captures.
 ## Per-command configuration (optional)
 
 There is no config file by default. When you want different head/tail budgets per
-command — without per-tool parsers — drop a small JSON file at
-`$XDG_CONFIG_HOME/l0-cache/config.json` (or `~/.config/l0-cache/config.json`):
+command — without per-tool parsers — drop a small file in
+`$XDG_CONFIG_HOME/l0-cache/` (or `~/.config/l0-cache/`). l0-cache auto-detects
+`config.{json,toml,yaml,yml,conf,ini}` — **transparent multi-format, zero extra
+dependencies** (JSON is parsed by serde; TOML/YAML/INI share a tiny flat parser):
 
-```json
-{
-  "defaults": { "recover": true },
-  "commands": {
-    "cargo":  { "tail_error": 300, "head": 50 },
-    "git":    { "head": 10, "tail": 40 },
-    "docker": { "head": 10, "tail": 80 }
-  }
-}
+```toml
+# config.toml  (or config.json / config.yaml — same flat schema)
+[defaults]
+recover = true
+
+[cargo]
+tail_error = 300
+head = 50
+
+[git]
+head = 10
+tail = 40
 ```
 
 Tunable keys per command: `head`, `tail`, `tail_error`, `threshold`, `only_errors`,
 `recover`. Commands are matched by resolved name (so `sh -c "cargo test"` matches
-`cargo`). Precedence is **explicit CLI flag > config > built-in default**, and
-auto-tuning then adjusts from the resolved base. A missing or malformed file is
-ignored (with one stderr note), never fatal.
+`cargo`); `[defaults]` / `[*]` apply to every command. Precedence is **explicit CLI
+flag > config > built-in default**, and auto-tuning then adjusts from the resolved
+base. A missing/malformed file is ignored (one stderr note for bad JSON; the flat
+formats skip unparseable lines), never fatal.
 
 ## Claude Code Integration (optional)
 
