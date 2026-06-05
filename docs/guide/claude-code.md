@@ -94,6 +94,36 @@ l0-cache --stats          # aggregated token savings
 If a session shows no savings at all, the most common cause is that it was
 started **before** the hook was installed or enabled — open a new session.
 
+## Other agents (Gemini CLI)
+
+Transparent wrapping requires a hook that can **rewrite** the command before it
+runs. Two agents support that today:
+
+| Agent | Hook event | Can rewrite? |
+|---|---|---|
+| Claude Code | `PreToolUse` (matcher `Bash`) | ✅ via `updatedInput` |
+| Gemini CLI | `BeforeTool` (matcher `run_shell_command`) | ✅ via `hookSpecificOutput.tool_input` |
+| Cursor | `beforeShellExecution` | ❌ allow/deny/ask only |
+
+`agent-hook.sh` installs the same conservative, fail-safe wrapper for either
+Claude Code or Gemini CLI (it also enables [`--recover`](/reference/#recover)):
+
+```sh
+./agent-hook.sh install gemini    # or: install claude   (default)
+./agent-hook.sh enable            # shared on/off toggle for all installed agents
+./agent-hook.sh status gemini
+./agent-hook.sh uninstall gemini
+```
+
+It honors `$GEMINI_CONFIG_DIR` (default `~/.gemini`) and edits that agent's
+`settings.json`. `claude-hook.sh` remains as a Claude-only convenience — either
+script works for Claude Code.
+
+**Cursor and most other agents** expose a `beforeShellExecution`-style hook that
+can only *approve or block* a command, not rewrite it, so they cannot be wrapped
+transparently. For those, add a line to the agent's rules/instructions file telling
+it to prefix noisy read-only commands with `l0-cache` (e.g. `l0-cache cargo test`).
+
 ## Uninstall
 
 ```sh

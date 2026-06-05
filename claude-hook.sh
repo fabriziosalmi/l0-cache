@@ -2,6 +2,9 @@
 # ==============================================================================
 # claude-hook.sh — manage the transparent l0-cache integration for Claude Code.
 #
+# NOTE: for multiple agents (Claude Code AND Gemini CLI) use `agent-hook.sh`,
+# which generalizes this script. This one stays as a Claude-only convenience.
+#
 # Installs a PreToolUse hook that routes *simple* Bash commands Claude Code runs
 # through `l0-cache` (to cut token usage), without the model prefixing anything.
 # It is conservative (compound/piped/interactive/stateful commands pass through

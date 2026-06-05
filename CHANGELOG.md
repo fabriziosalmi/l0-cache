@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-06-05
+
+### Added
+- **`--recover`**: on a failing command whose output was truncated, the full
+  un-truncated output is saved to a temp file and the banner points the agent at
+  it, so it can read the omitted middle without re-running. Lazy (no disk for
+  small/under-threshold output), memory- and size-bounded, and fail-safe (any I/O
+  error is ignored). Off by default.
+- **Per-command config file** at `$XDG_CONFIG_HOME/l0-cache/config.json` (or
+  `~/.config/l0-cache/config.json`): optional per-command overrides for `head`,
+  `tail`, `tail_error`, `threshold`, `only_errors`, and `recover`, with a
+  `defaults` block. Precedence is explicit CLI flag > config > built-in default;
+  commands match by resolved name; malformed/unknown keys are ignored gracefully.
+- **`agent-hook.sh`**: a generalized transparent-hook installer covering the
+  agents whose hook API can rewrite a command — **Claude Code** (`PreToolUse`) and
+  **Gemini CLI** (`BeforeTool`/`run_shell_command`) — with the same conservative,
+  fail-safe wrapper (and `--recover` enabled). `claude-hook.sh` stays as a
+  Claude-only convenience. Cursor's hook can only allow/deny (no rewrite), so it
+  cannot be wrapped transparently.
+
 ## [0.1.3] - 2026-06-05
 
 ### Added

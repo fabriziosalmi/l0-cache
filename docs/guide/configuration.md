@@ -1,7 +1,9 @@
 # Configuration
 
-`l0-cache` uses command-line flags for all configuration. There is no configuration
-file (by design -- explicit is better than implicit for a proxy tool).
+`l0-cache` is configured by command-line flags. An **optional** per-command config
+file fills in values you did not set on the command line (see
+[Config file](#config-file-optional) below) — there is still no required config,
+and explicit flags always win.
 
 ## Tuning Parameters
 
@@ -26,6 +28,35 @@ to capture full stack traces on failure.
 
 For **log inspection** (docker logs, journalctl): consider `--head 10 --tail 80`
 to prioritize recent entries.
+
+## Config file (optional)
+
+Drop a JSON file at `$XDG_CONFIG_HOME/l0-cache/config.json` (or
+`~/.config/l0-cache/config.json`) to set per-command defaults without recompiling
+and without per-tool parsers:
+
+```json
+{
+  "defaults": { "recover": true },
+  "commands": {
+    "cargo":  { "tail_error": 300, "head": 50 },
+    "git":    { "head": 10, "tail": 40 },
+    "docker": { "head": 10, "tail": 80 }
+  }
+}
+```
+
+- **Tunable keys** (all optional): `head`, `tail`, `tail_error`, `threshold`,
+  `only_errors`, `recover`.
+- **`defaults`** apply to every command; a per-command block in **`commands`**
+  layers on top (command wins field-by-field).
+- Commands are matched by **resolved name**, so `sh -c "cargo test"` matches the
+  `cargo` block — the same name used by metrics and auto-tuning.
+- **Precedence**: an explicit CLI flag > config file > built-in default.
+  Auto-tuning then adjusts from that resolved base.
+- A missing/unreadable file is silently ignored; a malformed file is ignored with
+  a single stderr note (unless `--quiet`). Unknown keys are skipped, so a config
+  written for a newer l0-cache won't break an older binary.
 
 ## Parameter Auto-tuning (Enabled by Default)
 

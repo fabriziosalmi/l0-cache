@@ -89,6 +89,12 @@ guard auto-enables inside detected AI-assistant terminals.
 #### `--quiet`, `-q`
 Suppress l0-cache's own stderr notices (e.g. auto-tuning messages).
 
+#### `--recover`
+On a **failing** command whose output was **truncated**, save the full
+(un-truncated) output to a temp file and reference it in the banner, so the agent
+can read the omitted middle without re-running. Off by default. Lazy (no disk for
+small/under-threshold output), bounded, and fail-safe (any I/O error is ignored).
+
 ### Utility
 
 #### `--doctor`

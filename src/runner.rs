@@ -10,12 +10,14 @@
 //! - Exit code 128+N for signal-killed children (POSIX convention)
 
 use std::io::{BufRead, BufReader, Read};
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::filter::{self, FilterPipeline, FilterResult};
+use crate::recovery::Recovery;
 
 /// Process-group id of the currently running captured child (0 when none).
 ///
@@ -31,6 +33,9 @@ pub struct RunResult {
     pub exit_code: i32,
     pub duration_ms: u64,
     pub strategy: &'static str,
+    /// Path to the saved full-output recovery file, when one was kept (only on a
+    /// failing + truncated run with `--recover`). `None` otherwise.
+    pub recovery_path: Option<PathBuf>,
 }
 
 /// Maximum length of a single line before we force-truncate (1MB).
@@ -285,10 +290,19 @@ pub fn run_captured(
     raw_mode: bool,
     only_errors: bool,
     idle_timeout: u64,
+    recover: bool,
 ) -> std::io::Result<RunResult> {
     let start = Instant::now();
 
     let (mut child, mut reader) = spawn_merged(cmd)?;
+
+    // Full-output recovery (best-effort, filtered mode only). Inactive unless
+    // `--recover` is set; lazily writes to a temp file only past the threshold.
+    let cmd_label = cmd
+        .first()
+        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .unwrap_or("cmd");
+    let mut recovery = Recovery::new(recover && !raw_mode, cmd_label, threshold);
 
     // Publish the child's process-group id so the parent's signal handlers and
     // the watchdog can target the whole subtree. pgid == pid (own group).
@@ -389,6 +403,7 @@ pub fn run_captured(
             all_lines.push(stripped.into_owned());
         } else {
             let stripped = filter::strip_ansi(&line_buf);
+            recovery.feed(&stripped);
             if let Some(ref mut pipe) = pipeline {
                 pipe.feed(stripped);
             }
@@ -435,6 +450,7 @@ pub fn run_captured(
             ));
         }
         let bytes_final = output.len();
+        let _ = recovery.finalize(false); // drop any partial file for binary output
         return Ok(RunResult {
             filter_result: FilterResult {
                 output,
@@ -447,6 +463,7 @@ pub fn run_captured(
             exit_code,
             duration_ms,
             strategy: "binary_skip",
+            recovery_path: None,
         });
     }
 
@@ -479,6 +496,7 @@ pub fn run_captured(
             exit_code,
             duration_ms,
             strategy: "raw",
+            recovery_path: None,
         })
     } else {
         let pipe = pipeline.unwrap();
@@ -498,11 +516,16 @@ pub fn run_captured(
             filter_result.truncated = true;
         }
 
+        // Keep the full-output recovery file only when the agent is likely to need
+        // the dropped middle: a failing command whose output was truncated.
+        let recovery_path = recovery.finalize(exit_code != 0 && filter_result.truncated);
+
         Ok(RunResult {
             filter_result,
             exit_code,
             duration_ms,
             strategy: "head_tail",
+            recovery_path,
         })
     }
 }
@@ -837,6 +860,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -846,7 +870,8 @@ mod tests {
 
     #[test]
     fn run_false_returns_nonzero() {
-        let result = run_captured(&["false".into()], 30, 30, 120, 100, false, false, 0).unwrap();
+        let result =
+            run_captured(&["false".into()], 30, 30, 120, 100, false, false, 0, false).unwrap();
         assert_ne!(result.exit_code, 0);
     }
 
@@ -867,6 +892,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         let lines: Vec<&str> = result.filter_result.output.lines().collect();
@@ -889,6 +915,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         let output = &result.filter_result.output;
@@ -907,6 +934,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         assert_eq!(result.exit_code, 42);
@@ -923,6 +951,7 @@ mod tests {
             true,
             false,
             0,
+            false,
         )
         .unwrap();
         assert_eq!(result.strategy, "raw");
@@ -944,6 +973,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         assert!(result.filter_result.truncated);
@@ -962,6 +992,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         assert!(!result.filter_result.truncated);
@@ -969,7 +1000,8 @@ mod tests {
 
     #[test]
     fn run_captured_empty_output() {
-        let result = run_captured(&["true".into()], 30, 30, 120, 100, false, false, 0).unwrap();
+        let result =
+            run_captured(&["true".into()], 30, 30, 120, 100, false, false, 0, false).unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.filter_result.output.trim().is_empty());
     }
@@ -985,6 +1017,7 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         assert!(result.duration_ms < 10_000, "echo should complete quickly");
@@ -1013,8 +1046,70 @@ mod tests {
             false,
             false,
             0,
+            false,
         )
         .unwrap();
         assert_eq!(result.exit_code, 127);
+    }
+
+    // ── recovery (--recover) tests ─────────────────────────────────────
+    // Distinct argv[0] per test → distinct temp filenames, so parallel runs
+    // don't race on a shared recovery file.
+
+    #[test]
+    fn recover_keeps_full_output_on_failure() {
+        let result = run_captured(
+            &["sh".into(), "-c".into(), "seq 1 500; exit 1".into()],
+            30,
+            30,
+            120,
+            100,
+            false,
+            false,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_ne!(result.exit_code, 0);
+        assert!(result.filter_result.truncated);
+        let path = result
+            .recovery_path
+            .expect("recovery file kept on failure + truncation");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.lines().count(), 500, "all lines preserved");
+        assert!(body.contains("\n250\n"), "the dropped middle is present");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recover_absent_on_success() {
+        // `seq` → label "seq", a distinct temp file from the failure test.
+        let result = run_captured(
+            &["seq".into(), "1".into(), "500".into()],
+            30,
+            30,
+            120,
+            100,
+            false,
+            false,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.filter_result.truncated);
+        assert!(
+            result.recovery_path.is_none(),
+            "no recovery file on success"
+        );
+    }
+
+    #[test]
+    fn recover_absent_when_not_truncated() {
+        // `false` → fails with no output → nothing was truncated → nothing to recover.
+        let result =
+            run_captured(&["false".into()], 30, 30, 120, 100, false, false, 0, true).unwrap();
+        assert_ne!(result.exit_code, 0);
+        assert!(result.recovery_path.is_none());
     }
 }

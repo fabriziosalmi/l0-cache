@@ -118,6 +118,9 @@ l0-cache --token-factor 8 cargo test
 --tail-error N       Tail lines on non-zero exit (default: 120)
 --threshold N        Only truncate if output exceeds N lines (default: 100)
 --only-errors        Keep only lines matching error/warn/fail/panic/exception/etc.
+--recover            On a failing command whose output was truncated, save the full
+                     output to a temp file and point to it in the banner (so the agent
+                     can read the omitted lines without re-running). Off by default.
 --idle-timeout N     SIGKILL the command (and its process group) after N seconds with
                      no output (prevents interactive-prompt deadlocks). 0 = off.
 --no-auto            Disable adaptive auto-tuning of parameters
@@ -157,6 +160,29 @@ saved, and per-command efficiency with proportional bars:
 emitted only on an interactive terminal — piping or redirecting (or setting
 `NO_COLOR`) yields clean, escape-free text; `FORCE_COLOR=1` forces it on for CI
 captures.
+
+## Per-command configuration (optional)
+
+There is no config file by default. When you want different head/tail budgets per
+command — without per-tool parsers — drop a small JSON file at
+`$XDG_CONFIG_HOME/l0-cache/config.json` (or `~/.config/l0-cache/config.json`):
+
+```json
+{
+  "defaults": { "recover": true },
+  "commands": {
+    "cargo":  { "tail_error": 300, "head": 50 },
+    "git":    { "head": 10, "tail": 40 },
+    "docker": { "head": 10, "tail": 80 }
+  }
+}
+```
+
+Tunable keys per command: `head`, `tail`, `tail_error`, `threshold`, `only_errors`,
+`recover`. Commands are matched by resolved name (so `sh -c "cargo test"` matches
+`cargo`). Precedence is **explicit CLI flag > config > built-in default**, and
+auto-tuning then adjusts from the resolved base. A missing or malformed file is
+ignored (with one stderr note), never fatal.
 
 ## Claude Code Integration (optional)
 
@@ -203,6 +229,24 @@ as an empty toggle file at `~/.config/l0-cache/hook.enabled`.
 > (see [Metrics](#metrics)). If a session shows no savings, the hook simply
 > never wrapped a command in it — confirm with `l0-cache --stats` and
 > `./claude-hook.sh status`.
+
+### Other agents (Gemini CLI)
+
+Transparent wrapping needs a hook that can **rewrite** the command. Two agents
+support that today — **Claude Code** (`PreToolUse`) and **Gemini CLI**
+(`BeforeTool`/`run_shell_command`) — and `agent-hook.sh` installs the same
+conservative, fail-safe wrapper for either (it also enables `--recover`):
+
+```sh
+./agent-hook.sh install gemini    # or: install claude   (default)
+./agent-hook.sh enable            # shared on/off toggle for all installed agents
+./agent-hook.sh status gemini
+```
+
+> **Cursor** and most other agents expose a hook that can only *allow/deny* a
+> command, not rewrite it, so they cannot be wrapped transparently. For those,
+> add an instruction to the agent's rules file to prefix noisy read-only commands
+> with `l0-cache` (e.g. `l0-cache cargo test`).
 
 ## Safety Guard
 

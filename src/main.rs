@@ -8,17 +8,24 @@
 //!   l0-cache -i vim file.txt     # force passthrough (interactive)
 
 mod args;
+mod config;
 mod filter;
+mod recovery;
 mod runner;
 mod telemetry;
 mod ui;
 
 use args::Args;
-use clap::Parser;
 use std::io::Write;
 
 fn main() {
-    let args = Args::parse();
+    // Parse via ArgMatches so we can tell an explicit CLI flag from a default —
+    // this drives config precedence (explicit CLI > config file > built-in default).
+    let matches = <Args as clap::CommandFactory>::command().get_matches();
+    let args =
+        <Args as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let from_cli =
+        |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
 
     // ── Shell completions ───────────────────────────────────────────────
     if let Some(shell) = args.completions {
@@ -98,9 +105,25 @@ fn main() {
     }
 
     // ── Capture mode (default) ──────────────────────────────────────────
-    let mut head = args.head;
-    let mut tail = args.tail;
-    let mut tail_error = args.tail_error;
+    // Per-command config (if any) fills in values the user did not set explicitly
+    // on the command line; auto-tuning then adjusts from that resolved base.
+    let cfg = config::Config::load(args.quiet);
+    let ov = cfg.for_command(&args.cmd_name());
+
+    let resolve = |id: &str, cli_val: usize, cfg_val: Option<usize>| {
+        if from_cli(id) {
+            cli_val
+        } else {
+            cfg_val.unwrap_or(cli_val)
+        }
+    };
+    let mut head = resolve("head", args.head, ov.head);
+    let mut tail = resolve("tail", args.tail, ov.tail);
+    let mut tail_error = resolve("tail_error", args.tail_error, ov.tail_error);
+    let threshold = resolve("threshold", args.threshold, ov.threshold);
+    // Booleans: an explicit CLI flag or the config can turn these on.
+    let only_errors = args.only_errors || ov.only_errors.unwrap_or(false);
+    let recover = args.recover || ov.recover.unwrap_or(false);
 
     if !args.no_auto {
         let tuned = telemetry::get_adaptive_params(
@@ -128,10 +151,11 @@ fn main() {
         head,
         tail,
         tail_error,
-        args.threshold,
+        threshold,
         args.raw,
-        args.only_errors,
+        only_errors,
         args.idle_timeout,
+        recover,
     ) {
         Ok(result) => {
             let mut output_to_write = result.filter_result.output.clone();
@@ -161,6 +185,15 @@ fn main() {
                     result.filter_result.lines_raw
                 );
                 output_to_write.push_str(&banner);
+
+                // Point the agent at the saved full output (only set on a failing,
+                // truncated run with --recover), so it can read the omitted lines.
+                if let Some(path) = &result.recovery_path {
+                    output_to_write.push_str(&format!(
+                        "... [l0-cache: full output saved to {} — read it for the omitted lines] ...\n",
+                        path.display()
+                    ));
+                }
             }
 
             let output_result = write_output(&output_to_write);

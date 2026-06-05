@@ -67,6 +67,12 @@ pub struct Args {
     #[arg(long)]
     pub only_errors: bool,
 
+    /// On a failing command whose output was truncated, save the full output to a
+    /// temp file and point to it in the banner (so the agent can read the omitted
+    /// lines without re-running). Off by default.
+    #[arg(long)]
+    pub recover: bool,
+
     /// Kill the command if it produces no output for this many seconds (prevents interactive deadlocks).
     #[arg(long, default_value_t = 0)]
     pub idle_timeout: u64,
