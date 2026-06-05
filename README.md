@@ -70,9 +70,25 @@ that works on *everything*, that's l0-cache.
 
 ## Installation
 
-### Quick Install (non-interactive)
+### Prebuilt binary (no Rust needed)
 
-Install `l0-cache` locally to `~/.local/bin/` with a single command:
+Download a prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
+latest release and install it to `~/.local/bin/` (with the `t` alias):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install-binary.sh | sh
+```
+
+### Homebrew (macOS / Linux)
+
+```sh
+brew tap fabriziosalmi/l0-cache https://github.com/fabriziosalmi/l0-cache
+brew install l0-cache
+```
+
+### From source (non-interactive)
+
+Builds with Rust/Cargo and installs to `~/.local/bin/`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install.sh | bash

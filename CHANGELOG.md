@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-06-05
+
+### Added
+- **Prebuilt release binaries — install without a Rust toolchain.** A CI workflow
+  builds and attaches macOS (arm64 + x64) and Linux (x64, static musl) binaries —
+  each with a SHA-256 checksum — to every tag's GitHub Release. `install-binary.sh`
+  downloads and verifies the right one for your platform:
+  `curl -fsSL …/install-binary.sh | sh`.
+- **Homebrew** (`Formula/l0-cache.rb`):
+  `brew tap fabriziosalmi/l0-cache https://github.com/fabriziosalmi/l0-cache` then
+  `brew install l0-cache`.
+- Cargo.toml `repository`/`homepage` metadata.
+
 ## [0.1.7] - 2026-06-05
 
 ### Added

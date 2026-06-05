@@ -1,10 +1,12 @@
 [package]
 name = "l0-cache"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 rust-version = "1.85"
 description = "Lightweight CLI proxy that reduces LLM token consumption via universal output filtering"
 license = "MIT"
+repository = "https://github.com/fabriziosalmi/l0-cache"
+homepage = "https://github.com/fabriziosalmi/l0-cache"
 keywords = ["cli", "proxy", "llm", "token", "filter"]
 categories = ["command-line-utilities"]
 
