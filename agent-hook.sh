@@ -32,6 +32,11 @@
 # ==============================================================================
 set -euo pipefail
 
+# Remove the jq scratch file even on an early `set -e` exit (e.g. a malformed
+# settings.json). The real settings.json is only ever replaced via `mv`.
+_l0_tmp=""
+trap 'rm -f "$_l0_tmp"' EXIT
+
 TOGGLE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/l0-cache"
 TOGGLE="$TOGGLE_DIR/hook.enabled"
 
@@ -132,7 +137,7 @@ cmd_install() {
   cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
 
   # Idempotent: drop any prior entry pointing at our wrapper, then append a fresh one.
-  local tmp; tmp="$(mktemp)"
+  local tmp; tmp="$(mktemp)"; _l0_tmp="$tmp"
   jq --arg ev "$EVENT" --arg m "$MATCHER" --arg h "$WRAPPER" '
     .hooks[$ev] = (
       ((.hooks[$ev] // []) | map(select((.hooks // []) | any(.command == $h) | not)))
@@ -152,7 +157,7 @@ cmd_uninstall() {
   need_jq
   if [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
-    local tmp; tmp="$(mktemp)"
+    local tmp; tmp="$(mktemp)"; _l0_tmp="$tmp"
     jq --arg ev "$EVENT" --arg h "$WRAPPER" '
       (if .hooks[$ev] then .hooks[$ev] |= map(select((.hooks // []) | any(.command == $h) | not)) else . end)
       | (if (.hooks[$ev] // []) == [] then (.hooks |= del(.[$ev])) else . end)
@@ -190,7 +195,7 @@ cmd_status() {
   if [ -f "$TOGGLE" ]; then ok "state: ENABLED ($TOGGLE)"; else warn "state: DISABLED (run: enable)"; fi
 }
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/,""); if ($0 !~ /^=+$/) print}' "$0"; }
 
 action="${1:-help}"
 case "$action" in

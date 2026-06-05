@@ -419,6 +419,25 @@ fn usd(tokens: usize, cost_per_mtok: f64) -> f64 {
     (tokens as f64 / 1_000_000.0) * cost_per_mtok
 }
 
+/// Whether a cost figure should be shown: finite and positive. Rejects `inf`/`nan`
+/// (which would otherwise serialize to JSON `null`) and non-positive rates.
+fn cost_shown(cost_per_mtok: f64) -> bool {
+    cost_per_mtok.is_finite() && cost_per_mtok > 0.0
+}
+
+/// Sanitize an externally-sourced command name for terminal display: drop control
+/// characters (the metrics file is user-writable, so `cmd` could carry raw ANSI/
+/// escapes — the `--json` path is unaffected since serde escapes them), then clamp
+/// to `width` columns (char-boundary safe).
+fn safe_label(cmd: &str, width: usize) -> String {
+    let clean: String = cmd.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > width {
+        format!("{}…", clean.chars().take(width - 1).collect::<String>())
+    } else {
+        clean
+    }
+}
+
 /// Read, parse, and aggregate the metrics file for the `since` window. Shared by
 /// `--stats`, `--stats --json`, and `--discover`.
 fn aggregate_metrics(since: Option<&str>) -> StatsData {
@@ -564,13 +583,13 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
         .pad(12)
         .paint(
             ui.pct_code(avg_pct),
-            &format!("{:>6}", format!("{:.1}%", avg_pct)),
+            &format!("{:>6}", format!("{:.1}%", avg_pct.min(100.0))),
         )
         .text("  ")
         .raw(&gauge, gw);
     println!("{}", ui.box_row(row));
 
-    if cost_per_mtok > 0.0 {
+    if cost_shown(cost_per_mtok) {
         let mut row = ui.line();
         row.paint("38;5;245", "Cost saved")
             .pad(12)
@@ -606,14 +625,9 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
             0.0
         };
 
-        // Truncate to the 10-wide name column (char-boundary safe: the metrics
-        // file is externally writable, so a name whose Nth byte falls mid-codepoint
-        // must not panic).
-        let cmd_disp = if cmd.chars().count() > 10 {
-            format!("{}…", cmd.chars().take(9).collect::<String>())
-        } else {
-            (*cmd).clone()
-        };
+        // Sanitize + clamp to the 10-wide name column (the metrics file is
+        // externally writable: drop control chars and stay char-boundary safe).
+        let cmd_disp = safe_label(cmd, 10);
 
         let (bar, bw) = crate::ui::meter(&ui, pct, 12);
         let low = stats.runs >= 5 && stats.tokens_raw_total > 0 && pct < 10.0;
@@ -628,7 +642,10 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
                 &format!("{:>6}", format_tokens(stats.tokens_saved_total)),
             )
             .text("  ")
-            .paint(ui.pct_code(pct), &format!("{:>6}", format!("{:.1}%", pct)))
+            .paint(
+                ui.pct_code(pct),
+                &format!("{:>6}", format!("{:.1}%", pct.min(100.0))),
+            )
             .text(" ")
             .raw(&bar, bw)
             .text("  ");
@@ -683,7 +700,7 @@ fn print_stats_json(agg: &StatsAgg, cost_per_mtok: f64) {
                 "tokens_raw": s.tokens_raw_total,
                 "efficiency_pct": round1(pct(s.tokens_saved_total, s.tokens_raw_total)),
             });
-            if cost_per_mtok > 0.0 {
+            if cost_shown(cost_per_mtok) {
                 v["usd_saved"] =
                     serde_json::json!(round2(usd(s.tokens_saved_total, cost_per_mtok)));
             }
@@ -698,7 +715,7 @@ fn print_stats_json(agg: &StatsAgg, cost_per_mtok: f64) {
         "efficiency_pct": round1(pct(agg.total_saved, agg.total_raw)),
         "commands": commands,
     });
-    if cost_per_mtok > 0.0 {
+    if cost_shown(cost_per_mtok) {
         out["cost_per_mtok"] = serde_json::json!(cost_per_mtok);
         out["usd_saved"] = serde_json::json!(round2(usd(agg.total_saved, cost_per_mtok)));
     }
@@ -718,7 +735,7 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
     };
     let ui = crate::ui::Ui::new();
     let cost = |tokens: usize| -> String {
-        if cost_per_mtok > 0.0 {
+        if cost_shown(cost_per_mtok) {
             format!("  [${:.2}]", usd(tokens, cost_per_mtok))
         } else {
             String::new()
@@ -744,8 +761,8 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
         for (cmd, s) in keep {
             println!(
                 "    {:<14} {:>4.0}%  {} runs   ~{} saved{}",
-                cmd,
-                pct(s.tokens_saved_total, s.tokens_raw_total),
+                safe_label(cmd, 14),
+                pct(s.tokens_saved_total, s.tokens_raw_total).min(100.0),
                 s.runs,
                 format_tokens(s.tokens_saved_total),
                 cost(s.tokens_saved_total),
@@ -770,8 +787,8 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
         for (cmd, s) in drop {
             println!(
                 "    {:<14} {:>4.1}%  {} runs",
-                cmd,
-                pct(s.tokens_saved_total, s.tokens_raw_total),
+                safe_label(cmd, 14),
+                pct(s.tokens_saved_total, s.tokens_raw_total).min(100.0),
                 s.runs
             );
         }
@@ -785,7 +802,7 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
     for (cmd, s) in by_raw.iter().take(3) {
         println!(
             "    {:<14} {} raw   {} runs",
-            cmd,
+            safe_label(cmd, 14),
             format_tokens(s.tokens_raw_total),
             s.runs
         );
@@ -1458,6 +1475,35 @@ fn get_adaptive_params_from_content_with_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pct_usd_cost_math() {
+        assert_eq!(pct(0, 0), 0.0); // division-by-zero guarded
+        assert_eq!(pct(900, 1000), 90.0);
+        assert!((usd(1_000_000, 3.0) - 3.0).abs() < 1e-9);
+        assert_eq!(usd(0, 5.0), 0.0);
+        // cost_shown rejects non-finite and non-positive rates.
+        assert!(cost_shown(3.0));
+        assert!(!cost_shown(0.0));
+        assert!(!cost_shown(-1.0));
+        assert!(!cost_shown(f64::INFINITY));
+        assert!(!cost_shown(f64::NAN));
+    }
+
+    #[test]
+    fn safe_label_strips_control_and_clamps() {
+        // A raw ESC sequence from a (user-writable) metrics file must not reach the
+        // terminal verbatim.
+        let s = safe_label("ev\u{1b}[31mil", 20);
+        // The ESC control byte is dropped; the now-inert "[31m" text is harmless.
+        assert!(!s.contains('\u{1b}'));
+        assert_eq!(s, "ev[31mil");
+        // Clamp to width with an ellipsis; char-boundary safe on multibyte input.
+        let long = safe_label("abcdefghijklmnop", 10);
+        assert_eq!(long.chars().count(), 10);
+        assert!(long.ends_with('…'));
+        assert_eq!(safe_label("日本語表示テスト長い名前", 5).chars().count(), 5);
+    }
 
     #[test]
     fn metric_token_calculation() {

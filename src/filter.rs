@@ -446,12 +446,16 @@ impl HeadTailBuffer {
 const DIFF_CTX_KEEP: usize = 3;
 /// Only collapse a context run longer than this (so short runs stay verbatim).
 const DIFF_CTX_MIN: usize = 8;
-/// Cap on buffered context lines, so a giant hunk can't grow memory unbounded.
+/// Flush the context buffer if it reaches this many lines OR this many bytes,
+/// so a pathological hunk can't grow memory unbounded (lines are 1 MB-capped, so a
+/// line-only cap could still buffer gigabytes — the byte cap is the real bound).
 const DIFF_CTX_CAP: usize = 5000;
+const DIFF_CTX_BYTE_CAP: usize = 1024 * 1024;
 
-/// `@@ -a,b +c,d @@` hunk header.
+/// `@@ -a,b +c,d @@` hunk header. Requires the space after `@@` that every real
+/// unified-diff hunk header has, so a line like `@@@@` does not falsely activate.
 fn is_hunk_header(l: &str) -> bool {
-    l.starts_with("@@") && l[2..].contains("@@")
+    l.starts_with("@@ ") && l[3..].contains("@@")
 }
 
 /// A line that still belongs to a unified diff (so seeing it does not end the diff).
@@ -473,6 +477,7 @@ fn is_diffish(l: &str) -> bool {
 struct DiffCollapse {
     active: bool,
     ctx: Vec<String>,
+    ctx_bytes: usize,
 }
 
 impl DiffCollapse {
@@ -480,6 +485,7 @@ impl DiffCollapse {
         Self {
             active: false,
             ctx: Vec::new(),
+            ctx_bytes: 0,
         }
     }
 
@@ -492,9 +498,11 @@ impl DiffCollapse {
             return out;
         }
         if self.active && line.starts_with(' ') {
+            self.ctx_bytes += line.len();
             self.ctx.push(line);
-            if self.ctx.len() >= DIFF_CTX_CAP {
-                self.flush_into(&mut out); // bound memory on a pathological hunk
+            // Bound memory on a pathological hunk (by lines AND bytes).
+            if self.ctx.len() >= DIFF_CTX_CAP || self.ctx_bytes >= DIFF_CTX_BYTE_CAP {
+                self.flush_into(&mut out);
             }
             return out;
         }
@@ -518,6 +526,7 @@ impl DiffCollapse {
         if n == 0 {
             return;
         }
+        self.ctx_bytes = 0; // both branches below empty `ctx`
         if n <= DIFF_CTX_MIN {
             out.append(&mut self.ctx);
             return;
@@ -1452,5 +1461,42 @@ mod tests {
         let out = run_diff(&refs);
         assert!(!out.join("\n").contains("unchanged diff"));
         assert_eq!(out.len(), lines.len());
+    }
+
+    #[test]
+    fn diff_hunk_header_requires_space() {
+        // `@@@@` (no space) must NOT activate diff mode; following context stays.
+        let out = run_diff(&["@@@@", " x", " y"]);
+        assert_eq!(out, vec!["@@@@", " x", " y"]);
+        // A real header does activate.
+        assert!(is_hunk_header("@@ -1,2 +1,2 @@"));
+        assert!(!is_hunk_header("@@@@"));
+        assert!(!is_hunk_header("@@ no second marker"));
+    }
+
+    #[test]
+    fn diff_collapse_through_full_pipeline() {
+        // Exercise the production wiring: DiffCollapse → CollapseLines → squeeze →
+        // buffer. Distinct context (won't prefix-collapse) so the marker survives.
+        let mut pipe = FilterPipeline::new(30, 30, false);
+        pipe.feed(Cow::Borrowed("@@ -1,40 +1,40 @@"));
+        for i in 0..30 {
+            pipe.feed(Cow::Owned(format!(" ctx_{i} = value_{}", i * 7)));
+        }
+        pipe.feed(Cow::Borrowed("-let old = 1;"));
+        pipe.feed(Cow::Borrowed("+let new = 2;"));
+        let r = pipe.finish(100, 0, 30);
+        assert!(
+            r.output.contains("unchanged diff lines"),
+            "marker should survive the pipeline: {}",
+            r.output
+        );
+        assert!(r.output.contains("-let old = 1;") && r.output.contains("+let new = 2;"));
+        // 30 context lines compressed → far fewer than 30 lines reach the buffer.
+        assert!(
+            r.lines_raw < 30,
+            "context collapsed: lines_raw={}",
+            r.lines_raw
+        );
     }
 }

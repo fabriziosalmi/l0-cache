@@ -642,3 +642,65 @@ fn discover_lists_commands() {
     assert!(s.contains("cargo"));
     let _ = std::fs::remove_dir_all(&xdg);
 }
+
+#[test]
+fn stats_skips_malformed_and_empty_lines() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("statsmalformed");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    // valid, blank, garbage, valid → exactly 2 rows aggregated, no crash.
+    let body = "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"tokens_saved\":900,\"tokens_raw\":1000}\n\
+                \n\
+                this is not json {{{\n\
+                {\"ts\":\"2026-06-05T10:01:00Z\",\"cmd\":\"git\",\"tokens_saved\":100,\"tokens_raw\":400}\n";
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("\"command\": \"cargo\"") && s.contains("\"command\": \"git\""));
+    assert!(s.contains("\"total_runs\": 2"), "exactly 2 valid rows: {s}");
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn config_overrides_apply_and_explicit_cli_wins() {
+    // Regression guard for the config-precedence wiring (explicit CLI > config >
+    // default), including the subtle "user passes a value equal to the default"
+    // case which must still override a differing config value.
+    let t = get_t_bin();
+    let xdg = temp_xdg("cfgprec-data");
+    let cfg = temp_xdg("cfgprec-conf");
+    std::fs::create_dir_all(cfg.join("l0-cache")).unwrap();
+    std::fs::write(
+        cfg.join("l0-cache").join("config.json"),
+        "{\"commands\":{\"seq\":{\"head\":7}}}",
+    )
+    .unwrap();
+    let run = |extra: &[&str]| -> String {
+        let mut c = Command::new(&t);
+        c.env("XDG_DATA_HOME", &xdg)
+            .env("XDG_CONFIG_HOME", &cfg)
+            .env("L0_CACHE_GUARD", "0")
+            .arg("--no-auto")
+            .args(extra)
+            .args(["seq", "1", "500"]);
+        String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
+    };
+    // 500 lines > threshold → truncated → banner reports the head budget used.
+    assert!(
+        run(&[]).contains("7 head"),
+        "config head=7 should apply with no CLI flag"
+    );
+    assert!(
+        run(&["--head", "30"]).contains("30 head"),
+        "explicit --head 30 (== default) must override config head=7"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+    let _ = std::fs::remove_dir_all(&cfg);
+}

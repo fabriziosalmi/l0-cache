@@ -80,13 +80,16 @@ err_usage() {
   exit 1
 }
 
-strip_block() { # remove the marked block from $1 (in place); no-op if absent
+strip_block() { # remove the marked block from $1 (in place) + trailing blank lines
   local f=$1
   [ -f "$f" ] || return 0
+  # Buffer the non-block lines, then drop trailing blanks so repeated
+  # install→remove cycles don't accumulate blank separators.
   awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
     index($0,b){skip=1}
-    skip==0{print}
+    skip==0{buf[n++]=$0}
     index($0,e){skip=0}
+    END{while(n>0 && buf[n-1]=="")n--; for(i=0;i<n;i++)print buf[i]}
   ' "$f" > "$f.l0tmp" && mv "$f.l0tmp" "$f"
 }
 
@@ -128,7 +131,7 @@ cmd_status() {
   fi
 }
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/,""); if ($0 !~ /^=+$/) print}' "$0"; }
 
 action="${1:-print}"
 case "$action" in

@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-06-05
+
+Hardening pass from a full file-by-file/test-by-test audit.
+
+### Fixed
+- **Terminal-injection hardening.** `--stats` and `--discover` now strip control
+  characters from the (user-writable) metrics file's command names, so a crafted
+  `metrics.jsonl` can no longer drive the terminal with raw ANSI escapes. `--json`
+  was already safe (serde escapes them).
+- **Recovery file is now PID-scoped** (`recovery-<cmd>-<pid>.log`), so concurrent
+  runs of the same command (multi-agent, `make -j`, parallel CI) no longer collide
+  on and corrupt one shared file. A mid-stream I/O error no longer leaves a partial
+  recovery file behind.
+- **Diff-context collapsing is byte-bounded**, not just line-bounded — restoring the
+  strict bounded-memory guarantee (1 MB-capped lines could otherwise buffer GBs). The
+  hunk-header detector now requires the space real `@@ … @@` headers have (no false
+  activation on `@@@@`).
+- **Stats robustness:** `--cost-per-mtok inf`/`nan` no longer emit `null` cost fields
+  in `--json`; displayed efficiency is clamped to 100% (a corrupt file can't show
+  500%); `--discover` truncates long command names so columns stay aligned.
+- **Shell installers:** `help` no longer leaks script internals (`set`/vars/dividers);
+  `agent-rules.sh` no longer accumulates a blank line per install→remove cycle; the
+  hook installers remove their `jq` scratch file even on an early-exit failure.
+
+### Added
+- Tests for all of the above, plus the previously-uncovered stats path (`pct`/`usd`/
+  `cost_shown`, control-char sanitization), the DiffCollapse↔pipeline integration,
+  and config precedence (explicit CLI flag > config > default). 205 unit + 21
+  integration tests.
+
 ## [0.1.5] - 2026-06-05
 
 ### Added

@@ -27,6 +27,11 @@
 # ==============================================================================
 set -euo pipefail
 
+# Remove the jq scratch file even on an early `set -e` exit (e.g. a malformed
+# settings.json). The real settings.json is only ever replaced via `mv`.
+_l0_tmp=""
+trap 'rm -f "$_l0_tmp"' EXIT
+
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS="$CLAUDE_DIR/settings.json"
@@ -106,7 +111,7 @@ cmd_install() {
   cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
 
   # Idempotent: drop any prior entry pointing at our wrapper, then append a fresh one.
-  local tmp; tmp="$(mktemp)"
+  local tmp; tmp="$(mktemp)"; _l0_tmp="$tmp"
   jq --arg h "$WRAPPER" '
     .hooks.PreToolUse = (
       ((.hooks.PreToolUse // []) | map(select((.hooks // []) | any(.command == $h) | not)))
@@ -127,7 +132,7 @@ cmd_uninstall() {
   [ -f "$SETTINGS" ] || { warn "No settings.json at $SETTINGS — nothing to remove."; }
   if [ -f "$SETTINGS" ]; then
     cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
-    local tmp; tmp="$(mktemp)"
+    local tmp; tmp="$(mktemp)"; _l0_tmp="$tmp"
     jq --arg h "$WRAPPER" '
       (if .hooks.PreToolUse then .hooks.PreToolUse |= map(select((.hooks // []) | any(.command == $h) | not)) else . end)
       | (if (.hooks.PreToolUse // []) == [] then (.hooks |= del(.PreToolUse)) else . end)
@@ -165,7 +170,7 @@ cmd_status() {
   if [ -f "$TOGGLE" ]; then ok "state: ENABLED ($TOGGLE)"; else warn "state: DISABLED (run: enable)"; fi
 }
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/,""); if ($0 !~ /^=+$/) print}' "$0"; }
 
 case "${1:-help}" in
   install)             cmd_install ;;

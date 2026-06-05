@@ -123,7 +123,14 @@ impl Recovery {
     /// caller passes `exit_code != 0 && truncated`) and a file was actually
     /// written; otherwise removes any partial file and returns `None`.
     pub fn finalize(mut self, keep: bool) -> Option<PathBuf> {
-        if !self.active || self.failed {
+        if !self.active {
+            return None;
+        }
+        if self.failed {
+            // A mid-stream I/O error may have left a partial file — clean it up.
+            if self.file.take().is_some() {
+                let _ = fs::remove_file(&self.path);
+            }
             return None;
         }
         let mut w = self.file.take()?; // None => never crossed threshold => nothing to recover
@@ -143,8 +150,10 @@ impl Recovery {
     }
 }
 
-/// `<tmp>/l0-cache/recovery-<sanitized-cmd>.log`. The stable per-command name
-/// means repeated failures of the same command reuse one file (bounded clutter).
+/// `<tmp>/l0-cache/recovery-<sanitized-cmd>-<pid>.log`. The PID keeps concurrent
+/// runs of the same command (multi-agent setups, `make -j`, parallel CI) from
+/// colliding on — and corrupting — one shared file; within a single process the
+/// name is stable, so a process never accumulates more than one file per command.
 fn recovery_path(cmd_label: &str) -> PathBuf {
     let safe: String = cmd_label
         .chars()
@@ -162,9 +171,11 @@ fn recovery_path(cmd_label: &str) -> PathBuf {
     } else {
         safe
     };
-    std::env::temp_dir()
-        .join("l0-cache")
-        .join(format!("recovery-{}.log", safe))
+    std::env::temp_dir().join("l0-cache").join(format!(
+        "recovery-{}-{}.log",
+        safe,
+        std::process::id()
+    ))
 }
 
 #[cfg(test)]
