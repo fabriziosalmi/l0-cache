@@ -583,6 +583,12 @@ fn stats_renders_with_seeded_metrics() {
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("cargo"));
-    assert!(s.contains("Total Runs"));
+    assert!(s.contains("TELEMETRY"));
+    assert!(s.contains("Runs"));
+    // Piped (non-TTY) output must be free of raw ANSI escapes.
+    assert!(
+        !s.contains('\x1b'),
+        "stats output should be plain when not a TTY"
+    );
     let _ = std::fs::remove_dir_all(&xdg);
 }

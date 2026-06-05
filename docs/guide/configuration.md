@@ -56,6 +56,11 @@ By default, `l0-cache` automatically optimizes parameter values based on the exe
 |---|---|
 | `XDG_DATA_HOME` | Override metrics directory (default: `~/.local/share/l0-cache/`) |
 | `HOME` | Used if `XDG_DATA_HOME` is not set |
+| `NO_COLOR` | If set (any value), disables ANSI color in `--stats` / `--doctor` |
+| `FORCE_COLOR` / `CLICOLOR_FORCE` | Force color on even when stdout is not a TTY (CI captures, screenshots) |
+
+By default `--stats` and `--doctor` emit color only when stdout is an interactive
+terminal, so piping or redirecting them yields clean, escape-free text.
 
 If neither is set (containers, cron), `l0-cache` falls back to `/etc/passwd` lookup.
 

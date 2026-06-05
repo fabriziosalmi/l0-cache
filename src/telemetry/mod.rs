@@ -475,91 +475,106 @@ pub fn print_stats(since: Option<&str>) {
         0.0
     };
 
-    let separator = "\x1b[38;5;238m──────────────────────────────────────────────────────────────────────────────\x1b[0m";
-
-    println!("{}", separator);
-    println!(" \x1b[1m\x1b[36m● l0-cache Telemetry Dashboard\x1b[0m");
-    println!("{}", separator);
-
-    if let Some(s) = since {
-        println!(" \x1b[38;5;245mPeriod:\x1b[0m       Last {}", s);
-    } else {
-        println!(" \x1b[38;5;245mPeriod:\x1b[0m       All-time");
-    }
-
-    println!(
-        " \x1b[38;5;245mTotal Runs:\x1b[0m   \x1b[1m{}\x1b[0m",
-        format_number(total_runs)
-    );
-
-    let saved_color = if avg_pct > 50.0 {
-        "\x1b[32m"
-    } else {
-        "\x1b[33m"
+    let ui = crate::ui::Ui::new();
+    let period = match since {
+        Some(s) => format!("last {}", s),
+        None => "all-time".to_string(),
     };
-    println!(
-        " \x1b[38;5;245mTokens Saved:\x1b[0m \x1b[1m{}{}\x1b[0m \x1b[38;5;245m({:.1}% efficiency)\x1b[0m\n",
-        saved_color,
-        format_tokens(total_tokens_saved),
-        avg_pct
-    );
 
-    println!(
-        " \x1b[1m\x1b[38;5;245m{:<24} {:>8} {:>12} {:>10}  IMPACT\x1b[0m",
-        "COMMAND", "RUNS", "SAVED", "EFFICIENCY"
-    );
-    println!("{}", separator);
+    // ── Summary card ─────────────────────────────────────────────────────
+    println!("{}", ui.box_top("l0-cache TELEMETRY", &period));
 
-    // Sort by tokens saved descending
+    let mut row = ui.line();
+    row.paint("38;5;245", "Runs")
+        .pad(12)
+        .paint("1", &format_number(total_runs));
+    println!("{}", ui.box_row(row));
+
+    let mut row = ui.line();
+    row.paint("38;5;245", "Saved")
+        .pad(12)
+        .paint(ui.pct_code(avg_pct), &format_tokens(total_tokens_saved))
+        .paint(
+            "38;5;238",
+            &format!("  of {} raw", format_tokens(total_tokens_raw)),
+        );
+    println!("{}", ui.box_row(row));
+
+    let (gauge, gw) = crate::ui::meter(&ui, avg_pct, 24);
+    let mut row = ui.line();
+    row.paint("38;5;245", "Efficiency")
+        .pad(12)
+        .paint(
+            ui.pct_code(avg_pct),
+            &format!("{:>6}", format!("{:.1}%", avg_pct)),
+        )
+        .text("  ")
+        .raw(&gauge, gw);
+    println!("{}", ui.box_row(row));
+
+    println!("{}", ui.box_div());
+
+    // ── Per-command table ────────────────────────────────────────────────
+    // Sort by tokens saved descending.
     let mut sorted: Vec<_> = by_cmd.iter().collect();
     sorted.sort_by_key(|b| std::cmp::Reverse(b.1.tokens_saved_total));
 
-    for (cmd, stats) in &sorted {
+    let mut hdr = ui.line();
+    hdr.paint("38;5;245", &format!("{:<10}", "COMMAND"))
+        .text(" ")
+        .paint("38;5;245", &format!("{:>5}", "RUNS"))
+        .text("  ")
+        .paint("38;5;245", &format!("{:>6}", "SAVED"))
+        .text("  ")
+        .paint("38;5;245", &format!("{:>6}", "EFFIC."))
+        .text(" ")
+        .paint("38;5;245", "IMPACT");
+    println!("{}", ui.box_row(hdr));
+
+    for (i, (cmd, stats)) in sorted.iter().enumerate() {
         let pct = if stats.tokens_raw_total > 0 {
             (stats.tokens_saved_total as f64 / stats.tokens_raw_total as f64) * 100.0
         } else {
             0.0
         };
 
-        // Sparkline generation (15 chars wide)
-        let bar_width: usize = 15;
-        let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
-        let empty = bar_width.saturating_sub(filled);
-
-        let color = match pct {
-            p if p > 80.0 => "\x1b[38;5;46m",  // Bright Green
-            p if p > 40.0 => "\x1b[38;5;214m", // Orange
-            _ => "\x1b[38;5;196m",             // Red
-        };
-
-        let bar = format!(
-            "{}{}{}\x1b[38;5;236m{}\x1b[0m",
-            color,
-            "█".repeat(filled),
-            "\x1b[0m",
-            "·".repeat(empty)
-        );
-
-        // Char-boundary safe: the metrics file is externally writable, so a
-        // command name whose 22nd byte falls mid-codepoint must not panic.
-        let cmd_disp = if cmd.chars().count() > 23 {
-            format!("{}…", cmd.chars().take(22).collect::<String>())
+        // Truncate to the 10-wide name column (char-boundary safe: the metrics
+        // file is externally writable, so a name whose Nth byte falls mid-codepoint
+        // must not panic).
+        let cmd_disp = if cmd.chars().count() > 10 {
+            format!("{}…", cmd.chars().take(9).collect::<String>())
         } else {
-            cmd.to_string()
+            (*cmd).clone()
         };
 
-        println!(
-            " \x1b[38;5;252m{:<24}\x1b[0m \x1b[38;5;245m{:>8}\x1b[0m \x1b[1m{:>12}\x1b[0m {:>9}%  {}",
-            cmd_disp,
-            format_number(stats.runs),
-            format_tokens(stats.tokens_saved_total),
-            format!("{:.1}", pct),
-            bar
-        );
-    }
-    println!("{}", separator);
+        let (bar, bw) = crate::ui::meter(&ui, pct, 12);
+        let low = stats.runs >= 5 && stats.tokens_raw_total > 0 && pct < 10.0;
 
-    // Warn about low-savings commands
+        let mut row = ui.line();
+        row.paint("38;5;252", &format!("{:<10}", cmd_disp))
+            .text(" ")
+            .paint("38;5;245", &format!("{:>5}", format_number(stats.runs)))
+            .text("  ")
+            .paint(
+                "1",
+                &format!("{:>6}", format_tokens(stats.tokens_saved_total)),
+            )
+            .text("  ")
+            .paint(ui.pct_code(pct), &format!("{:>6}", format!("{:.1}%", pct)))
+            .text(" ")
+            .raw(&bar, bw)
+            .text("  ");
+        if i == 0 && stats.tokens_saved_total > 0 {
+            row.paint("32", "↑ best");
+        } else if low {
+            row.paint("33", "⚠ low");
+        }
+        println!("{}", ui.box_row(row));
+    }
+
+    println!("{}", ui.box_bottom());
+
+    // ── Footnotes ────────────────────────────────────────────────────────
     let low_savings: Vec<_> = sorted
         .iter()
         .filter(|(_, stats)| {
@@ -567,37 +582,53 @@ pub fn print_stats(since: Option<&str>) {
                 && stats.tokens_raw_total > 0
                 && (stats.tokens_saved_total as f64 / stats.tokens_raw_total as f64) < 0.1
         })
+        .map(|(cmd, _)| (*cmd).clone())
         .collect();
 
     if !low_savings.is_empty() {
-        println!(" \x1b[38;5;245mHint: Low-savings commands (consider removing from `l0-cache` prefix):\x1b[0m");
-        for (cmd, stats) in low_savings {
-            let pct = (stats.tokens_saved_total as f64 / stats.tokens_raw_total as f64) * 100.0;
-            println!(
-                "   \x1b[38;5;245m{} \x1b[38;5;239m—\x1b[0m {:.1}% savings over {} runs",
-                cmd, pct, stats.runs
-            );
-        }
-        println!("{}", separator);
+        println!(
+            "  {} low savings on {} — consider dropping the `l0-cache` prefix there",
+            ui.yellow("⚠"),
+            low_savings.join(", ")
+        );
     }
+    println!(
+        "  {} {}",
+        ui.dim("metrics"),
+        ui.dim(&path.display().to_string())
+    );
 }
 
 /// Diagnoses the l0-cache installation, PATH resolution, shell environment, and active LLM editors.
 pub fn run_doctor() {
-    let separator = "\x1b[38;5;238m──────────────────────────────────────────────────────────────────────────────\x1b[0m";
-    println!("{}", separator);
-    println!(" \x1b[1m\x1b[36m● l0-cache Diagnostic Doctor\x1b[0m \x1b[38;5;245m— System, Shell, and LLM Editor Health Check\x1b[0m");
-    println!("{}", separator);
+    let ui = crate::ui::Ui::new();
+    println!("{}", ui.box_top("l0-cache DOCTOR", "health check"));
+    println!(
+        "{}",
+        ui.box_row({
+            let mut l = ui.line();
+            l.paint(
+                "38;5;245",
+                "System, shell, telemetry & LLM-editor diagnostics",
+            );
+            l
+        })
+    );
+    println!("{}", ui.box_bottom());
+    println!();
 
     let mut ok_count = 0;
     let mut warn_count = 0;
     let mut err_count = 0;
 
     // 1. Binary & PATH check
-    println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m1. Binary & PATH Status\x1b[0m");
+    println!("{}", ui.section("1. Binary & PATH"));
     match std::env::current_exe() {
         Ok(exe_path) => {
-            println!("  Current Executable: {}", exe_path.display());
+            println!(
+                "{}",
+                ui.field("Executable", &exe_path.display().to_string())
+            );
 
             // Check if current_exe is in PATH directories
             let path_var = std::env::var("PATH").unwrap_or_default();
@@ -617,14 +648,21 @@ pub fn run_doctor() {
 
             if found_in_path {
                 let resolved = resolved_path.unwrap();
-                println!("  Resolved in PATH:   {}", resolved.display());
-                println!("  \x1b[32m✔ [OK]\x1b[0m l0-cache is correctly configured in your PATH.");
+                println!(
+                    "{}",
+                    ui.field("Resolved in PATH", &resolved.display().to_string())
+                );
+                println!(
+                    "{}",
+                    ui.ok("l0-cache is correctly configured in your PATH.")
+                );
                 ok_count += 1;
             } else {
                 println!(
-                    "  \x1b[33m⚠ [WARN]\x1b[0m l0-cache was not found in your PATH directories."
+                    "{}",
+                    ui.warn("l0-cache was not found in your PATH directories.")
                 );
-                println!("     To fix this, run the installer: ./install.sh --local");
+                println!("{}", ui.hint("run the installer: ./install.sh --local"));
                 warn_count += 1;
             }
 
@@ -634,23 +672,32 @@ pub fn run_doctor() {
                 let candidate = dir.join("t");
                 if candidate.exists() {
                     t_found = true;
-                    println!("  Short Command 't':  {}", candidate.display());
+                    println!(
+                        "{}",
+                        ui.field("Short command 't'", &candidate.display().to_string())
+                    );
                     break;
                 }
             }
             if t_found {
-                println!("  \x1b[32m✔ [OK]\x1b[0m Short command 't' is installed and ready.");
+                println!("{}", ui.ok("Short command 't' is installed and ready."));
                 ok_count += 1;
             } else {
-                println!("  \x1b[33m⚠ [WARN]\x1b[0m Short command 't' not found in PATH.");
-                println!("     Consider creating a symlink or alias for 't' to speed up typing.");
+                println!("{}", ui.warn("Short command 't' not found in PATH."));
+                println!(
+                    "{}",
+                    ui.hint("create a symlink or alias 't' to speed up typing.")
+                );
                 warn_count += 1;
             }
         }
         Err(e) => {
             println!(
-                "  \x1b[31m✖ [ERR]\x1b[0m Failed to determine current executable path: {}",
-                e
+                "{}",
+                ui.err(&format!(
+                    "Failed to determine current executable path: {}",
+                    e
+                ))
             );
             err_count += 1;
         }
@@ -658,10 +705,10 @@ pub fn run_doctor() {
     println!();
 
     // 2. Shell Configuration & Auto-completions
-    println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m2. Shell Configuration & Auto-completions\x1b[0m");
+    println!("{}", ui.section("2. Shell Configuration & Completions"));
     if let Ok(shell_var) = std::env::var("SHELL") {
         let shell_name = shell_var.rsplit('/').next().unwrap_or(&shell_var);
-        println!("  Active Shell: {}", shell_name);
+        println!("{}", ui.field("Active shell", shell_name));
 
         let home = std::env::var("HOME").unwrap_or_default();
         let mut config_file = None;
@@ -694,48 +741,55 @@ pub fn run_doctor() {
 
         if let Some(ref path) = config_file {
             if path.exists() {
-                println!("  Profile File: {}", path.display());
+                println!("{}", ui.field("Profile file", &path.display().to_string()));
                 if let Ok(content) = fs::read_to_string(path) {
                     if content.contains("l0-cache") || content.contains("alias t=") {
-                        println!(
-                            "  \x1b[32m✔ [OK]\x1b[0m Shell profile contains l0-cache references."
-                        );
+                        println!("{}", ui.ok("Shell profile contains l0-cache references."));
                         ok_count += 1;
                     } else {
-                        println!("  \x1b[33m⚠ [WARN]\x1b[0m Shell profile exists but has no active l0-cache references.");
+                        println!(
+                            "{}",
+                            ui.warn("Shell profile exists but has no active l0-cache references.")
+                        );
                         warn_count += 1;
                     }
                 } else {
-                    println!("  \x1b[33m⚠ [WARN]\x1b[0m Shell profile exists but is unreadable.");
+                    println!("{}", ui.warn("Shell profile exists but is unreadable."));
                     warn_count += 1;
                 }
             } else {
                 println!(
-                    "  \x1b[33m⚠ [WARN]\x1b[0m Shell profile not found at {}",
-                    path.display()
+                    "{}",
+                    ui.warn(&format!("Shell profile not found at {}", path.display()))
                 );
                 warn_count += 1;
             }
         }
 
         if completions_exist {
-            println!("  \x1b[32m✔ [OK]\x1b[0m Shell auto-completions are installed.");
+            println!("{}", ui.ok("Shell auto-completions are installed."));
             ok_count += 1;
         } else {
-            println!("  \x1b[33m⚠ [WARN]\x1b[0m Shell auto-completions are not installed.");
-            println!("     Run the installer to set up completions: ./install.sh --local");
+            println!("{}", ui.warn("Shell auto-completions are not installed."));
+            println!(
+                "{}",
+                ui.hint("set them up with the installer: ./install.sh --local")
+            );
             warn_count += 1;
         }
     } else {
-        println!("  \x1b[33m⚠ [WARN]\x1b[0m SHELL environment variable is not set.");
+        println!("{}", ui.warn("SHELL environment variable is not set."));
         warn_count += 1;
     }
     println!();
 
     // 3. Telemetry & File Permissions
-    println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m3. Telemetry & Permissions\x1b[0m");
+    println!("{}", ui.section("3. Telemetry & Permissions"));
     if let Some(metrics_file) = metrics_path() {
-        println!("  Metrics File: {}", metrics_file.display());
+        println!(
+            "{}",
+            ui.field("Metrics file", &metrics_file.display().to_string())
+        );
         if metrics_file.exists() {
             if let Ok(meta) = fs::metadata(&metrics_file) {
                 #[cfg(unix)]
@@ -747,26 +801,35 @@ pub fn run_doctor() {
                     let no_group_or_world = (mode & 0o077) == 0;
                     if no_group_or_world {
                         println!(
-                            "  \x1b[32m✔ [OK]\x1b[0m Metrics file exists with secure permissions ({:03o}, no group/world access).",
-                            mode & 0o777
+                            "{}",
+                            ui.ok(&format!(
+                                "Secure permissions ({:03o}, no group/world access).",
+                                mode & 0o777
+                            ))
                         );
                         ok_count += 1;
                     } else {
-                        println!("  \x1b[33m⚠ [WARN]\x1b[0m Metrics file permissions are insecure: {:o} (group/world access; expected 0600).", mode & 0o777);
                         println!(
-                            "     To secure it, run: chmod 600 {}",
-                            metrics_file.display()
+                            "{}",
+                            ui.warn(&format!(
+                                "Insecure permissions: {:o} (group/world access; expected 0600).",
+                                mode & 0o777
+                            ))
+                        );
+                        println!(
+                            "{}",
+                            ui.hint(&format!("secure it: chmod 600 {}", metrics_file.display()))
                         );
                         warn_count += 1;
                     }
                 }
                 #[cfg(not(unix))]
                 {
-                    println!("  \x1b[32m✔ [OK]\x1b[0m Metrics file exists and is writable.");
+                    println!("{}", ui.ok("Metrics file exists and is writable."));
                     ok_count += 1;
                 }
             } else {
-                println!("  \x1b[31m✖ [ERR]\x1b[0m Metrics file exists but is inaccessible.");
+                println!("{}", ui.err("Metrics file exists but is inaccessible."));
                 err_count += 1;
             }
 
@@ -775,47 +838,65 @@ pub fn run_doctor() {
             match fs::create_dir(&lock_path) {
                 Ok(_) => {
                     let _ = fs::remove_dir(&lock_path);
-                    println!("  \x1b[32m✔ [OK]\x1b[0m Telemetry locking directory is writable.");
+                    println!("{}", ui.ok("Telemetry locking directory is writable."));
                     ok_count += 1;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    println!("  \x1b[32m✔ [OK]\x1b[0m Telemetry locking directory is writable (currently busy/exists).");
+                    println!(
+                        "{}",
+                        ui.ok("Telemetry locking directory is writable (currently busy).")
+                    );
                     ok_count += 1;
                 }
                 Err(e) => {
                     println!(
-                        "  \x1b[31m✖ [ERR]\x1b[0m Telemetry lock creation failed: {}",
-                        e
+                        "{}",
+                        ui.err(&format!("Telemetry lock creation failed: {}", e))
                     );
                     err_count += 1;
                 }
             }
         } else {
-            println!("  \x1b[32m✔ [OK]\x1b[0m Telemetry file does not exist yet (will be created on first run).");
+            println!(
+                "{}",
+                ui.ok("Telemetry file does not exist yet (created on first run).")
+            );
             ok_count += 1;
         }
     } else {
-        println!("  \x1b[31m✖ [ERR]\x1b[0m Failed to resolve metrics file path (HOME and XDG_DATA_HOME are missing).");
+        println!(
+            "{}",
+            ui.err("Failed to resolve metrics file path (HOME and XDG_DATA_HOME are missing).")
+        );
         err_count += 1;
     }
     println!();
 
     // 4. Active LLM & Terminal Editors Check
-    println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m4. Active LLM Editors & Terminal Environments\x1b[0m");
+    println!("{}", ui.section("4. LLM Editors & Terminal Environment"));
     let mut editor_detected = false;
 
     if std::env::var("CLAUDE_CODE").is_ok() {
-        println!("  Detected Editor:   \x1b[32mClaude Code CLI\x1b[0m");
+        println!(
+            "{}",
+            ui.field("Detected editor", &ui.green("Claude Code CLI"))
+        );
         editor_detected = true;
     }
 
     if let Ok(term_prog) = std::env::var("TERM_PROGRAM") {
-        println!("  Terminal Program:  {}", term_prog);
+        println!("{}", ui.field("Terminal program", &term_prog));
         if term_prog == "vscode" || term_prog.contains("vscode") {
-            println!("  Detected Editor:   \x1b[32mVS Code Terminal\x1b[0m");
+            println!(
+                "{}",
+                ui.field("Detected editor", &ui.green("VS Code Terminal"))
+            );
             editor_detected = true;
         } else if term_prog.to_lowercase().contains("cursor") {
-            println!("  Detected Editor:   \x1b[32mCursor AI Terminal\x1b[0m");
+            println!(
+                "{}",
+                ui.field("Detected editor", &ui.green("Cursor AI Terminal"))
+            );
             editor_detected = true;
         }
     }
@@ -823,51 +904,94 @@ pub fn run_doctor() {
     if (std::env::var("VSCODE_GIT_IPC_HANDLE").is_ok() || std::env::var("VSCODE_PORT").is_ok())
         && !editor_detected
     {
-        println!("  Detected Editor:   \x1b[32mVS Code/Cursor Backend Terminal\x1b[0m");
+        println!(
+            "{}",
+            ui.field(
+                "Detected editor",
+                &ui.green("VS Code/Cursor Backend Terminal")
+            )
+        );
         editor_detected = true;
     }
 
     if std::env::var("GEMINI_CLI").is_ok() {
-        println!("  Detected Editor:   \x1b[32mGemini CLI Client\x1b[0m");
+        println!(
+            "{}",
+            ui.field("Detected editor", &ui.green("Gemini CLI Client"))
+        );
         editor_detected = true;
     }
 
     if editor_detected {
-        println!("  \x1b[32m✔ [OK]\x1b[0m Active LLM terminal context detected. l0-cache will automatically intercept AI subcommands.");
+        println!(
+            "{}",
+            ui.ok("Active LLM terminal detected — l0-cache will intercept AI subcommands.")
+        );
         ok_count += 1;
     } else {
-        println!("  \x1b[33m⚠ [WARN]\x1b[0m Running in standard shell environment (no active LLM editor detected).");
-        println!("     Make sure your editor terminal inherits the shell PATH setup.");
+        println!(
+            "{}",
+            ui.warn("Standard shell environment (no active LLM editor detected).")
+        );
+        println!(
+            "{}",
+            ui.hint("ensure your editor terminal inherits the shell PATH setup.")
+        );
         warn_count += 1;
     }
     println!();
 
     // 5. Safety Command Guard Check
-    println!("\x1b[1m\x1b[36m●\x1b[0m \x1b[1m5. Safety Command Guard Status\x1b[0m");
+    println!("{}", ui.section("5. Safety Command Guard"));
     let guard_active = guard_enabled(false, false);
     if guard_active {
-        println!("  \x1b[32m● [ACTIVE]\x1b[0m Safety Guard is active. Destructive/exfiltrating commands will be blocked.");
+        println!(
+            "{}",
+            ui.ok("ACTIVE — destructive/exfiltrating commands will be blocked.")
+        );
         ok_count += 1;
     } else {
-        println!("  \x1b[33m● [INACTIVE]\x1b[0m Safety Guard is inactive. Commands will run without safety inspection.");
+        println!(
+            "{}",
+            ui.warn("INACTIVE — commands run without safety inspection.")
+        );
         warn_count += 1;
     }
     println!();
 
     // 6. Final Report
-    println!("\x1b[1m● Diagnostic Summary:\x1b[0m");
-    println!("  Checks Passed:  \x1b[32m{}\x1b[0m", ok_count);
-    println!("  Warnings:       \x1b[33m{}\x1b[0m", warn_count);
-    println!("  Errors:         \x1b[31m{}\x1b[0m", err_count);
-    println!();
+    println!("{}", ui.box_top("SUMMARY", ""));
+    println!(
+        "{}",
+        ui.box_row({
+            let mut l = ui.line();
+            l.paint("32", &format!("✔ {} passed", ok_count))
+                .text("    ")
+                .paint("33", &format!("⚠ {} warnings", warn_count))
+                .text("    ")
+                .paint(
+                    if err_count > 0 { "31" } else { "38;5;245" },
+                    &format!("✗ {} errors", err_count),
+                );
+            l
+        })
+    );
+    println!("{}", ui.box_bottom());
 
     if err_count == 0 && warn_count == 0 {
-        println!("\x1b[32m● Your l0-cache installation is healthy and fully optimized!\x1b[0m");
+        println!(
+            "  {}",
+            ui.green("● Your l0-cache installation is healthy and fully optimized.")
+        );
     } else if err_count == 0 {
-        println!("\x1b[33m● Configuration is functional, but has warning recommendations.\x1b[0m");
+        println!(
+            "  {}",
+            ui.yellow("● Configuration is functional, with warning recommendations.")
+        );
     } else {
         println!(
-            "\x1b[31m● Installation has critical errors. Please resolve them or reinstall.\x1b[0m"
+            "  {}",
+            ui.red("● Installation has critical errors. Please resolve them or reinstall.")
         );
     }
 }

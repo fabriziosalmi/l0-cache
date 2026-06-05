@@ -7,14 +7,19 @@
 set -euo pipefail
 
 # --- Color Definitions & Icons ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# Color only on an interactive terminal with NO_COLOR unset (so piping the
+# installer to a file or log stays clean).
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m' # No Color
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; NC=''
+fi
 
 ICON_INFO="${BLUE}●${NC}"
 ICON_SUCCESS="${GREEN}●${NC}"

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-05
+
+### Added
+- **Color/UI overhaul.** `--stats` is now a dense, boxed dashboard (summary card +
+  per-command table with proportional efficiency bars and `↑ best` / `⚠ low`
+  markers), and `--doctor` is re-skinned to share the same boxed visual language.
+- **`NO_COLOR` / TTY color guard.** `--stats` and `--doctor` emit ANSI only on an
+  interactive terminal; piping or redirecting now yields clean, escape-free text.
+  `NO_COLOR` (any value) and `TERM=dumb` force color off; `FORCE_COLOR` /
+  `CLICOLOR_FORCE` force it on for CI captures.
+- README status badges (CI, latest release, license, MSRV) and a declared
+  `rust-version = "1.85"` so the MSRV is enforced by cargo.
+
+### Changed
+- `benchmark.sh` rewritten with a boxed header and a comparison table (lines, size,
+  estimated tokens, reduction %); `install.sh` and `claude-hook.sh` now honor the
+  `NO_COLOR` / TTY color guard.
+
 ## [0.1.2] - 2026-06-04
 
 ### Added

@@ -11,6 +11,7 @@ mod args;
 mod filter;
 mod runner;
 mod telemetry;
+mod ui;
 
 use args::Args;
 use clap::Parser;

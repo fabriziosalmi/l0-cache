@@ -64,6 +64,9 @@ Ceiling limit for failure backoff tail expansion. Default: 1000.
 
 #### `--stats`
 Print an aggregated token savings report and exit. Does not run a command.
+Renders a boxed dashboard (runs, tokens saved, per-command efficiency and bars).
+Color is emitted only on a TTY; piping, redirecting, or `NO_COLOR` yields plain
+text, and `FORCE_COLOR` forces it on.
 
 #### `--since <DURATION>`
 Filter the stats report to entries within the given time window.

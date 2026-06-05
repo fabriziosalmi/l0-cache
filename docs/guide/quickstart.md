@@ -65,20 +65,22 @@ l0-cache --stats --since 24h
 Example output (colors omitted):
 
 ```
-──────────────────────────────────────────────────────────────────────────────
- ● l0-cache Telemetry Dashboard
-──────────────────────────────────────────────────────────────────────────────
- Period:       Last 7d
- Total Runs:   42
- Tokens Saved: 12.5k (71.5% efficiency)
-
- COMMAND                      RUNS         SAVED EFFICIENCY  IMPACT
-──────────────────────────────────────────────────────────────────────────────
- cargo                          15          8.2k      78.4%  ████████████···
- git                            12          3.1k      65.2%  ██████████·····
- npm                             8          1.2k      54.1%  ████████·······
-──────────────────────────────────────────────────────────────────────────────
+┌─ l0-cache TELEMETRY ───────────────────────────────── last 7d ─┐
+│ Runs        35                                                 │
+│ Saved       12.5k  of 17.4k raw                                │
+│ Efficiency   71.8%  █████████████████░░░░░░░                   │
+├────────────────────────────────────────────────────────────────┤
+│ COMMAND     RUNS   SAVED  EFFIC. IMPACT                        │
+│ cargo         15    8.2k   78.5% █████████░░░  ↑ best          │
+│ git           12    3.1k   65.3% ████████░░░░                  │
+│ npm            8    1.2k   54.2% ██████░░░░░░                  │
+└────────────────────────────────────────────────────────────────┘
+  metrics ~/.local/share/l0-cache/metrics.jsonl
 ```
+
+When stdout is not a terminal (piped or redirected, or with `NO_COLOR` set),
+the dashboard renders as plain text like above; on a TTY it is colorized, with
+the efficiency bars shaded red → orange → green by savings.
 
 ## Error Handling
 

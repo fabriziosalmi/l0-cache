@@ -131,6 +131,29 @@ l0-cache --token-factor 8 cargo test
 --version            Print version with git commit hash
 ```
 
+## Telemetry Dashboard
+
+`l0-cache --stats` renders an aggregated savings report — total runs, tokens
+saved, and per-command efficiency with proportional bars:
+
+```
+┌─ l0-cache TELEMETRY ───────────────────────────────── last 7d ─┐
+│ Runs        35                                                 │
+│ Saved       12.5k  of 17.4k raw                                │
+│ Efficiency   71.8%  █████████████████░░░░░░░                   │
+├────────────────────────────────────────────────────────────────┤
+│ COMMAND     RUNS   SAVED  EFFIC. IMPACT                        │
+│ cargo         15    8.2k   78.5% █████████░░░  ↑ best          │
+│ git           12    3.1k   65.3% ████████░░░░                  │
+│ npm            8    1.2k   54.2% ██████░░░░░░                  │
+└────────────────────────────────────────────────────────────────┘
+```
+
+`--doctor` shares the same boxed visual language for its health report. Color is
+emitted only on an interactive terminal — piping or redirecting (or setting
+`NO_COLOR`) yields clean, escape-free text; `FORCE_COLOR=1` forces it on for CI
+captures.
+
 ## Claude Code Integration (optional)
 
 Normally you (or your AI assistant) prefix a command with `l0-cache` explicitly.

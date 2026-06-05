@@ -31,7 +31,12 @@ WRAPPER="$HOOKS_DIR/l0-cache-wrapper.sh"
 TOGGLE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/l0-cache"
 TOGGLE="$TOGGLE_DIR/hook.enabled"
 
-c_g=$'\033[0;32m'; c_y=$'\033[0;33m'; c_r=$'\033[0;31m'; c_b=$'\033[0;34m'; c_0=$'\033[0m'
+# Color only on an interactive terminal with NO_COLOR unset.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  c_g=$'\033[0;32m'; c_y=$'\033[0;33m'; c_r=$'\033[0;31m'; c_b=$'\033[0;34m'; c_0=$'\033[0m'
+else
+  c_g=''; c_y=''; c_r=''; c_b=''; c_0=''
+fi
 info() { printf '  %s●%s %s\n' "$c_b" "$c_0" "$*"; }
 ok()   { printf '  %s●%s %s\n' "$c_g" "$c_0" "$*"; }
 warn() { printf '  %s●%s %s\n' "$c_y" "$c_0" "$*"; }
