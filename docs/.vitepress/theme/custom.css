@@ -1,0 +1,196 @@
+/* ============================================================================
+   l0-cache docs — macOS-native, minimal, clean.
+   Overrides VitePress design tokens; a few restrained component touches.
+   ============================================================================ */
+
+:root {
+  /* San Francisco system stack (Apple), then graceful fallbacks. */
+  --vp-font-family-base: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --vp-font-family-mono: "SF Mono", ui-monospace, "JetBrains Mono", "Fira Code",
+    Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* One restrained accent — Apple system blue. */
+  --vp-c-brand-1: #0066cc;
+  --vp-c-brand-2: #0a84ff;
+  --vp-c-brand-3: #0071e3;
+  --vp-c-brand-soft: rgba(10, 132, 255, 0.1);
+
+  /* Apple neutrals: warm off-white surfaces, hairline dividers. */
+  --vp-c-bg: #ffffff;
+  --vp-c-bg-alt: #fbfbfd;
+  --vp-c-bg-soft: #f5f5f7;
+  --vp-c-bg-elv: #ffffff;
+  --vp-c-divider: rgba(0, 0, 0, 0.07);
+  --vp-c-border: rgba(0, 0, 0, 0.1);
+  --vp-c-gutter: rgba(0, 0, 0, 0.06);
+
+  --vp-c-text-1: #1d1d1f; /* near-black */
+  --vp-c-text-2: #515154;
+  --vp-c-text-3: #86868b;
+
+  /* Soft, low-contrast elevation. */
+  --vp-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.04);
+  --vp-shadow-2: 0 4px 14px rgba(0, 0, 0, 0.07);
+  --vp-shadow-3: 0 8px 28px rgba(0, 0, 0, 0.1);
+
+  /* Roomier layout. */
+  --vp-layout-max-width: 1440px;
+
+  /* Frosted, translucent chrome. */
+  --vp-nav-bg-color: rgba(255, 255, 255, 0.72);
+  --vp-sidebar-bg-color: var(--vp-c-bg);
+
+  /* Clean hero: solid headline, no rainbow clip. */
+  --vp-home-hero-name-color: var(--vp-c-text-1);
+  --vp-home-hero-name-background: transparent;
+}
+
+.dark {
+  /* True-black macOS dark with subtle elevation. */
+  --vp-c-bg: #000000;
+  --vp-c-bg-alt: #0a0a0c;
+  --vp-c-bg-soft: #161617;
+  --vp-c-bg-elv: #161617;
+  --vp-c-divider: rgba(255, 255, 255, 0.1);
+  --vp-c-border: rgba(255, 255, 255, 0.12);
+  --vp-c-gutter: rgba(255, 255, 255, 0.08);
+
+  --vp-c-text-1: #f5f5f7;
+  --vp-c-text-2: #a1a1a6;
+  --vp-c-text-3: #6e6e73;
+
+  --vp-c-brand-1: #2997ff; /* Apple dark-mode blue */
+  --vp-c-brand-2: #0a84ff;
+  --vp-c-brand-3: #2997ff;
+  --vp-c-brand-soft: rgba(41, 151, 255, 0.14);
+
+  --vp-nav-bg-color: rgba(0, 0, 0, 0.6);
+}
+
+/* Crisp SF rendering + a touch more air. */
+html {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.011em;
+}
+
+/* Tighter, heavier display headings — the SF Display feel. */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.VPHero .name,
+.VPHero .text {
+  letter-spacing: -0.021em;
+}
+.vp-doc h1 {
+  font-weight: 700;
+}
+.vp-doc h2 {
+  font-weight: 650;
+  border-top-color: var(--vp-c-divider);
+}
+
+/* ── Frosted-glass top nav (macOS vibrancy) ───────────────────────────────── */
+.VPNavBar:not(.top) {
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+}
+.VPNavBar:not(.top) .divider {
+  background-color: transparent;
+}
+.VPNavBar:not(.top) .content-body {
+  box-shadow: inset 0 -1px var(--vp-c-divider);
+}
+
+/* ── Hero: clean, generous, pill CTAs ─────────────────────────────────────── */
+.VPHero .name {
+  font-weight: 700;
+}
+/* Solid headline (kill the default gradient text-clip — that's the "slop" look). */
+.VPHero .name .clip {
+  background: none;
+  -webkit-text-fill-color: var(--vp-c-text-1);
+  color: var(--vp-c-text-1);
+}
+.VPHero .image-bg {
+  opacity: 0.45;
+  filter: blur(56px);
+}
+.VPHero .VPImage {
+  border-radius: 14px;
+  box-shadow: var(--vp-shadow-3);
+}
+.VPButton {
+  border-radius: 980px; /* Apple pill */
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  transition:
+    transform 0.15s ease,
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+.VPButton:hover {
+  transform: translateY(-1px);
+}
+.VPButton.brand {
+  border-color: transparent;
+}
+
+/* ── Soft, rounded surfaces ───────────────────────────────────────────────── */
+.vp-doc div[class*="language-"] {
+  border-radius: 12px;
+  border: 1px solid var(--vp-c-divider);
+  box-shadow: var(--vp-shadow-1);
+}
+.vp-doc :not(pre) > code {
+  border-radius: 6px;
+  font-size: 0.85em;
+  background-color: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  padding: 0.15em 0.4em;
+}
+.vp-doc .custom-block {
+  border-radius: 12px;
+  border-width: 1px;
+}
+.vp-doc table {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+}
+.vp-doc tr {
+  border-top: 1px solid var(--vp-c-divider);
+}
+.vp-doc th {
+  background-color: var(--vp-c-bg-soft);
+  font-weight: 600;
+}
+
+/* Home feature cards: hairline border, soft lift on hover. */
+.VPFeature {
+  border-radius: 16px;
+  border: 1px solid var(--vp-c-divider);
+  background-color: var(--vp-c-bg-alt);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+}
+.VPFeature:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--vp-shadow-2);
+  border-color: var(--vp-c-border);
+}
+
+/* Sidebar/link polish. */
+.VPSidebarItem.is-active > .item .link .text {
+  font-weight: 600;
+}
+.vp-doc a {
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
