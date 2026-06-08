@@ -20,6 +20,14 @@ brew tap fabriziosalmi/l0-cache https://github.com/fabriziosalmi/l0-cache
 brew install l0-cache
 ```
 
+This installs the `l0-cache` binary (and the `t` alias) plus the integration
+helpers — `l0-cache-claude-hook`, `l0-cache-agent-hook`, `l0-cache-agent-rules` —
+so the transparent Claude Code / Gemini CLI hook works without cloning the repo:
+
+```sh
+l0-cache-claude-hook install && l0-cache-claude-hook enable
+```
+
 ## From source (non-interactive)
 
 Builds with Rust/Cargo and installs to `~/.local/bin/` (requires Git and a Rust

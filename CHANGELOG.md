@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-06-08
+
+### Added
+- **Homebrew now ships the integration scripts**, not just the binary. The formula
+  installs the standalone setup tools as namespaced commands —
+  `l0-cache-claude-hook`, `l0-cache-agent-hook`, `l0-cache-agent-rules` — so the
+  transparent Claude Code / Gemini CLI hook can be set up without cloning the repo
+  (`l0-cache-claude-hook install && l0-cache-claude-hook enable`, or
+  `l0-cache-agent-hook install gemini` for Gemini CLI). Claude Code and Gemini CLI
+  are now managed the same way out of the box.
+- `jq` is now a Homebrew runtime dependency (the hook managers use it to edit the
+  agent's `settings.json`), so the hook works out of the box after `brew install`.
+
+### Changed
+- `claude-hook.sh` is now behavior-identical to `agent-hook.sh` for Claude Code:
+  the generated wrapper enables `--recover` (full output saved to a temp file when
+  a failing command is truncated) and extracts the command with the same robust
+  `.tool_input.command // .toolInput.command` path. Existing installs pick this up
+  on the next `install`; the public CLI is unchanged.
+
 ## [0.1.8] - 2026-06-05
 
 ### Added

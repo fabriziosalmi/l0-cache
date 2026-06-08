@@ -271,6 +271,13 @@ It is **off by default** and designed to stay out of the way:
 ./claude-hook.sh uninstall   # remove the hook registration and wrapper
 ```
 
+> **Installed via Homebrew?** The same script ships as the `l0-cache-claude-hook`
+> command — use it instead of `./claude-hook.sh` (no clone needed):
+>
+> ```sh
+> l0-cache-claude-hook install && l0-cache-claude-hook enable
+> ```
+
 > **Activation:** after `install` (or any change to `settings.json`), start a
 > **new** Claude Code session so the hook is loaded — hooks are read at session
 > startup. The `enable`/`disable` toggle then takes effect immediately.
@@ -298,6 +305,9 @@ conservative, fail-safe wrapper for either (it also enables `--recover`):
 ./agent-hook.sh enable            # shared on/off toggle for all installed agents
 ./agent-hook.sh status gemini
 ```
+
+> **Homebrew:** these ship as `l0-cache-agent-hook` and `l0-cache-agent-rules`
+> (same arguments), so no clone is needed.
 
 > **Cursor** and most other agents expose a hook that can only *allow/deny* a
 > command, not rewrite it, so they cannot be wrapped transparently. For those,

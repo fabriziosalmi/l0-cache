@@ -68,7 +68,8 @@ command -v l0-cache >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
 input="$(cat)"
-cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+# Field paths differ slightly across agents; try the common ones, then bail.
+cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // .toolInput.command // empty' 2>/dev/null)"
 [ -n "$cmd" ] || exit 0
 
 # Already wrapped?
@@ -76,8 +77,8 @@ case "$cmd" in
   l0-cache\ * | t\ * | */l0-cache\ * | */t\ *) exit 0 ;;
 esac
 
-# Risky to wrap a single program: shell operators, redirects, subshells,
-# substitution, multi-line, or stateful builtins that must affect the real shell.
+# Risky to wrap: shell operators, redirects, subshells, substitution, multi-line,
+# or stateful builtins that must affect the real shell.
 case "$cmd" in
   *'&&'* | *'||'* | *';'* | *'|'* | *'>'* | *'<'* | *'`'* | *'$('* | *'&'*) exit 0 ;;
   *$'\n'*) exit 0 ;;
@@ -93,8 +94,9 @@ esac
 
 # Wrap. Keep every other tool_input field; only the command changes. No
 # permissionDecision → wrapped commands still go through your normal permissions.
+# `--recover` saves full output to a temp file on a failing, truncated command.
 printf '%s' "$input" | jq -c \
-  --arg new "l0-cache --quiet $cmd" \
+  --arg new "l0-cache --quiet --recover $cmd" \
   '{hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: (.tool_input + {command: $new})}}' 2>/dev/null || exit 0
 WRAP
   chmod +x "$WRAPPER"
