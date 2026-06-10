@@ -13,16 +13,16 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    # Serialize the matrix against a single shared group so the three
-    # `softprops/action-gh-release@v2` invocations don't race each other on
-    # release creation — that race produced a duplicate draft + an HTTP 401
-    # when v0.1.10 was tagged. Job-level concurrency with a static group is
-    # what serializes matrix variants (workflow-level would only block a
-    # second run of the same workflow on the same ref, not the matrix).
-    concurrency:
-      group: release-${{ github.ref }}
-      cancel-in-progress: false
+    # Serialize the matrix so the three `softprops/action-gh-release@v2`
+    # invocations don't race each other on release creation — that race
+    # produced a duplicate draft + an HTTP 401 when v0.1.10 was tagged.
+    # `max-parallel: 1` runs the matrix legs one at a time natively.
+    # (The previous job-level `concurrency` group also serialized, but a
+    # GitHub concurrency group holds at most ONE pending job — with a 3-leg
+    # matrix the third leg got CANCELLED, dropping the x86_64-apple asset
+    # from the v0.1.11 release until a manual re-run.)
     strategy:
+      max-parallel: 1
       fail-fast: false
       matrix:
         include:
