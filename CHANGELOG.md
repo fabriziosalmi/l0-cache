@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-06-10
+
+Self-learning audit + iterative fixes. `--stats` gains an `AUTO-TUNING` section
+that reports, honestly, when the adaptive rules fire and when they don't —
+prior versions had the mechanism but no visibility into it. Five surgical
+changes, each measurable against the same metrics file before/after:
+
+### Added
+- **`AUTO-TUNING` section in `--stats`** and `auto_tuning` object in
+  `--stats --json` — per-event firing counts (`expand_tail_err`,
+  `decay_moderate`, `decay_strong`, `proactive_shrink`, `decay_steady`),
+  a `noisy` counter (failure-expansions that fired on zero-output runs —
+  the false-positive surface), top-cmds breakdown. No behavior change here;
+  this is the baseline visibility every subsequent fix is measured against.
+- **`adaptive_event` field in `metrics.jsonl`** records which rule branch
+  fired per run (or absent when none fired). Old records without the field
+  parse cleanly.
+- **`args_hash` field in `metrics.jsonl`** — 8-char FNV-1a 64-bit hash of the
+  redacted args string (no new crate). The adaptive learner now keys on
+  `(cmd, args_hash)` instead of `cmd` alone, so `curl https://api.openai.com`
+  and `curl https://example.com` no longer pollute each other's streak.
+- **`proactive_shrink` rule** — fires when a bucket has ≥20 records, all
+  clean (success + not truncated), and `max(lines_raw) + 5` ≤ half the
+  current head+tail budget. Apply head=max+5, tail=`default_tail/4`,
+  bounded by `auto_floor`. Max-based on purpose: never introduces a new
+  truncation vs. observed history.
+- **`decay_steady` rule** — window-adaptive complement to the consecutive
+  decay rules. Looks at the last 20 records of the bucket: if ≥80% are
+  truncated successes (regardless of streak), shrink head/tail by 30%.
+  Catches the steady-state truncation pattern that "5 consecutive"
+  misses when an occasional non-truncated run breaks the streak.
+- **`tuned.jsonl` persistence sidecar** at
+  `$XDG_DATA_HOME/l0-cache/tuned.jsonl`. After each rule firing, the
+  resulting `(head, tail, tail_error)` is saved per `(cmd, args_hash)`
+  bucket. The next run of the same bucket starts from that tune instead
+  of the CLI defaults — so the decay rules **compound**: one bucket's
+  head can shrink 30 → 24 → 19 → 11 → 10 (`auto_floor`) over four
+  firings, instead of resetting to 24 each time. Best-effort I/O,
+  fail-safe; corrupt or missing file degrades to the previous "no
+  persistence" behavior.
+
+### Changed
+- **Adaptive failure-expand no longer triggers on no-output runs.** A
+  `exit_code != 0 && lines_raw == 0` record (e.g. `grep` "no match",
+  `find` "not found") used to grow `consecutive_failures` and fire
+  `expand_tail_err`, wasting tokens to expand a tail that was zero
+  bytes to begin with. Such entries now break the streak instead of
+  contributing to it — `--stats`' `noisy` counter trends toward zero
+  on this kind of usage.
+- Pre-0.1.10 metric records (no `adaptive_event` / `args_hash` fields)
+  remain countable by `--stats` (totals and per-cmd savings) but are
+  excluded from the adaptive learner so legacy data can't re-introduce
+  the pre-Step-2 noise. Graceful degradation, both directions.
+
 ## [0.1.9] - 2026-06-08
 
 ### Added

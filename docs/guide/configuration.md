@@ -83,26 +83,71 @@ git:
 
 ## Parameter Auto-tuning (Enabled by Default)
 
-By default, `l0-cache` automatically optimizes parameter values based on the execution history of the same command (stored in the local metrics log). Pass `--no-auto` to disable this behavior.
+By default, `l0-cache` automatically tunes `head`, `tail`, and `tail_error`
+per **bucket** — `(cmd, args_hash)` — based on the execution history in the
+local metrics log. Pass `--no-auto` to disable. Each bucket carries its
+own learning, so e.g. `curl https://api.openai.com` and `curl https://example.com`
+don't pollute each other.
 
-### How It Works
+### Rules
 
-1. **Anti-Loop Backoff (Consecutive Failures)**:
-   - If the last $F$ runs of the command failed (exited with a non-zero status), the `--tail-error` parameter is scaled up:
-     $$\text{tuned\_tail\_error} = \text{default\_tail\_error} \times (1 + F)$$
-   - This ensures that if an LLM gets stuck in an error-fixing loop, `l0-cache` automatically exposes more log/trace context so the LLM has the necessary information to resolve the issue.
-   - The expanded error tail is capped at a ceiling of `1000` lines (customizable via `--auto-ceiling <N>`).
-   - The backoff resets as soon as the command successfully exits with status 0.
+Five rules feed off the same per-bucket history. The first one whose
+trigger matches wins (top-to-bottom precedence).
 
-2. **Token Optimization Decay (Consecutive Successes)**:
-   - If the last $S$ runs of the command succeeded and were truncated, the head and tail parameters are gradually reduced:
-     - $3 \le S < 5$: 20% reduction (e.g. head/tail become 24).
-     - $S \ge 5$: 40% reduction (e.g. head/tail become 18).
-   - This saves additional token budget when commands are running smoothly.
-   - A safety floor of `10` lines (customizable via `--auto-floor <N>`) is always enforced to ensure minimal context is preserved.
+1. **`expand_tail_err` — anti-loop backoff**. If the last F consecutive
+   bucket records were failures *with output* (`exit_code != 0 && lines_raw > 0`),
+   scale `tail_error` by `(1 + F)`, capped by `--auto-ceiling` (default 1000).
+   Failing records with `lines_raw == 0` (e.g. `grep` "no match", `find`
+   "not found") **break** the streak rather than feed it — their failure
+   mode isn't one extra tail of error context can help with. Records with
+   `--stats --json` track this distinction under the `noisy` counter.
 
-3. **Diagnostic Print**:
-   - If parameters are adjusted, `l0-cache` prints a subtle note to `stderr` describing the change (e.g., `l0-cache: auto-tuning: 2 consecutive failures detected, expanding tail_error to 360`).
+2. **`decay_moderate` — 3-4 consecutive truncated successes**. Shrink
+   `head` and `tail` by 20% (floored at `--auto-floor`, default 10).
+
+3. **`decay_strong` — 5+ consecutive truncated successes**. Shrink `head`
+   and `tail` by 40% (same floor).
+
+4. **`decay_steady` — window-adaptive**. If the bucket has ≥20 records,
+   all successful, and ≥80% of the last 20 are truncated, shrink `head`
+   and `tail` by 30%. Catches the steady-state pattern that "5 consecutive"
+   misses when occasional non-truncated runs break the streak.
+
+5. **`proactive_shrink` — long clean histories**. If the bucket has ≥20
+   records, all clean (success + not truncated), and `max(lines_raw) + 5`
+   is at most half the current `head + tail` budget, set
+   `head = max(lines_raw) + 5` and `tail = default_tail / 4`. Max-based,
+   so it never introduces a new truncation vs. observed history.
+
+### Persistence (`tuned.jsonl`)
+
+Each time a rule fires (with a real change to `head`/`tail`/`tail_error`),
+the result is appended to `$XDG_DATA_HOME/l0-cache/tuned.jsonl`, keyed by
+`(cmd, args_hash)`. The next run of the same bucket starts from the saved
+tune instead of the CLI defaults, so the decay/shrink rules **compound**:
+
+```
+run 4:  decay_moderate from defaults (30, 30)   → head=24 tail=24 saved
+run 5:  decay_moderate from cached  (24, 24)    → head=19 tail=19 saved
+run 6:  decay_strong   from cached  (19, 19)    → head=11 tail=11 saved
+run 7:  decay_strong   from cached  (11, 11)    → head=10 tail=10  (floor hit)
+```
+
+The floor (`--auto-floor`) stops further compounding. Persistence is
+best-effort: a missing or unreadable `tuned.jsonl` silently degrades to
+the no-persistence behavior. Delete the file to reset all learned tunes.
+
+### Diagnostic print
+
+When a rule changes the params, `l0-cache` prints a single note to stderr
+(silenced by `--quiet`), e.g.
+
+```
+l0-cache: auto-tuning: 2 consecutive failures detected, expanding tail_error to 720
+```
+
+The same firings are aggregated under the `AUTO-TUNING` section of
+`l0-cache --stats` (and the `auto_tuning` block of `--stats --json`).
 
 ## Environment Variables
 

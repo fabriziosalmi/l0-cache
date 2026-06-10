@@ -159,7 +159,8 @@ fn test_auto_tuning_success_decay_e2e() {
         assert!(!stderr_str.contains("auto-tuning"));
     }
 
-    // Run 4: 20% decay (history has 3 successes -> optimizing head=24 tail=24)
+    // Run 4: 20% decay against the SYSTEM defaults (30,30) → head=24, tail=24.
+    // First firing in this bucket so the persistence sidecar is empty.
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
@@ -172,7 +173,10 @@ fn test_auto_tuning_success_decay_e2e() {
         assert!(stderr_str.contains("consecutive successful runs, optimizing head=24 tail=24"));
     }
 
-    // Run 5: still 24 head + 24 tail (history has 4 successes)
+    // Run 5: Step 5 — persistence compounds. The previous firing saved
+    // (24, 24); now the moderate decay applies on TOP of that → 24*0.8=19.
+    // Pre-Step-5 this run still showed 24/24 because the rule re-derived
+    // from system defaults each time.
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
@@ -180,10 +184,14 @@ fn test_auto_tuning_success_decay_e2e() {
             .output()
             .unwrap();
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout_str.contains("[Showing 24 head + 24 tail of 200 lines]"));
+        assert!(
+            stdout_str.contains("[Showing 19 head + 19 tail of 200 lines]"),
+            "Step 5 compounding: expected 19/19; got: {stdout_str}"
+        );
     }
 
-    // Run 6: 40% decay (history has 5 successes -> optimizing head=18 tail=18)
+    // Run 6: strong decay (5+ truncated) on cached (19, 19) → 19*0.6=11.
+    // Pre-Step-5 this was 18/18 because the rule started from defaults.
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
@@ -191,9 +199,12 @@ fn test_auto_tuning_success_decay_e2e() {
             .output()
             .unwrap();
         let stdout_str = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout_str.contains("[Showing 18 head + 18 tail of 200 lines"));
+        assert!(
+            stdout_str.contains("[Showing 11 head + 11 tail of 200 lines"),
+            "Step 5 compounding: expected 11/11; got: {stdout_str}"
+        );
         let stderr_str = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr_str.contains("consecutive successful runs, optimizing head=18 tail=18"));
+        assert!(stderr_str.contains("consecutive successful runs, optimizing head=11 tail=11"));
     }
 
     let _ = std::fs::remove_dir_all(temp_dir);
@@ -235,7 +246,9 @@ fn test_auto_tuning_failure_backoff_e2e() {
         assert!(stderr_str.contains("1 consecutive failures detected, expanding tail_error to 240"));
     }
 
-    // 3rd failure: F=2 -> tail_error scales to 360
+    // 3rd failure: Step 5 — persistence compounds. Cached tail_error from
+    // the previous firing is 240, factor=3 → 720. Pre-Step-5 this was 360
+    // because the rule started from the system default (120) each time.
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
@@ -243,22 +256,49 @@ fn test_auto_tuning_failure_backoff_e2e() {
             .output()
             .unwrap();
         let stderr_str = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr_str.contains("2 consecutive failures detected, expanding tail_error to 360"));
+        assert!(
+            stderr_str.contains("2 consecutive failures detected, expanding tail_error to 720"),
+            "Step 5 compounding: expected 720; got: {stderr_str}"
+        );
     }
 
-    // Successful run resets failures
+    // Step 2 — bucket isolation. Switching args switches buckets, so a
+    // different-args run is NOT influenced by the failure streak of the
+    // previous bucket. (Pre-Step-2 this was a quirk: the prior 3 failures
+    // would still drive `expand_tail_err` on this run even though the args
+    // differ entirely.)
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
             .args(["--auto", "sh", "-c", "seq 1 2; exit 0"])
             .output()
             .unwrap();
-        // Since get_adaptive_params runs before command execution, it will still show the warning for 3 consecutive failures:
         let stderr_str = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr_str.contains("3 consecutive failures detected, expanding tail_error to 480"));
+        assert!(
+            !stderr_str.contains("auto-tuning"),
+            "different-args run is in its own bucket (Step 2): {stderr_str}"
+        );
     }
 
-    // The next execution is clean (0 consecutive failures)
+    // Running the original args once more is back in the failing bucket —
+    // the 3 prior failures still dominate its history → expand still fires.
+    // Step 5 — cached tail_error is 720 from the previous firing; factor=4
+    // → 2880, capped at auto_ceiling (default 1000). Pre-Step-5 was 480.
+    {
+        let output = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &temp_dir)
+            .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
+            .output()
+            .unwrap();
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr_str.contains("3 consecutive failures detected, expanding tail_error to 1000"),
+            "Step 5 compounding hits ceiling: expected 1000; got: {stderr_str}"
+        );
+    }
+
+    // And one more clean run in the OTHER bucket stays quiet — bucket B's
+    // history is just one success, no streak to expand on.
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
@@ -738,4 +778,781 @@ fn config_toml_is_picked_up_transparently() {
     assert!(s.contains("5 head"), "config.toml head=5 should apply: {s}");
     let _ = std::fs::remove_dir_all(&xdg);
     let _ = std::fs::remove_dir_all(&cfg);
+}
+
+// ── Auto-tuning telemetry — e2e ──────────────────────────────────────────────
+//
+// These tests drive the real binary against an isolated XDG dir so the smoke
+// behavior the user sees on their box (the new AUTO-TUNING section in --stats
+// + the auto_tuning JSON block) is anchored against real metric records, not
+// internal aggregation helpers.
+
+#[test]
+fn auto_tuning_section_renders_when_rule_fires_for_real() {
+    // Drive enough consecutive failures to fire `expand_tail_err`, then run
+    // --stats and assert the AUTO-TUNING section appears with the firings the
+    // rule generated. This is the load-bearing demo: if this test fails, the
+    // user's --stats no longer reports what the auto-tuner is doing.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-stats");
+
+    // Run a failing command 3 times — from run #2 onward the rule fires.
+    for _ in 0..3 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
+            .output()
+            .unwrap();
+    }
+
+    // metrics.jsonl must now carry at least one adaptive_event=expand_tail_err.
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let body = std::fs::read_to_string(&metrics).expect("metrics file should exist");
+    assert!(
+        body.contains("\"adaptive_event\":\"expand_tail_err\""),
+        "metrics should carry the event tag: {body}"
+    );
+
+    // --stats must render the new section with non-zero firings.
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .arg("--stats")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("AUTO-TUNING"), "section header missing: {s}");
+    assert!(s.contains("Firings"), "firings line missing: {s}");
+    assert!(s.contains("expand_tail_err"), "event label missing: {s}");
+    // The exact count depends on how many runs the rule observed in history,
+    // but it must be at least 1 (the second run triggered it).
+    assert!(
+        !s.contains("Firings     0"),
+        "expected non-zero Firings: {s}"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn auto_tuning_section_says_quiet_when_no_firings() {
+    // Seed metrics.jsonl with only clean (non-firing) records. The section
+    // must still appear, with firings=0 and the "auto-tuning quiet" hint —
+    // honesty: we explicitly say the rule didn't fire instead of hiding it.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-quiet");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":20,\"lines_final\":20,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\"}\n";
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .arg("--stats")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("AUTO-TUNING"), "section header missing: {s}");
+    assert!(s.contains("Firings"), "firings line missing: {s}");
+    assert!(
+        s.contains("quiet"),
+        "should explicitly mark zero-firings as quiet: {s}"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn auto_tuning_json_block_is_well_formed() {
+    // Seed mixed records (one of each event type + one without). Assert that
+    // --stats --json produces a valid auto_tuning object with the correct
+    // per-event counters AND that per-command entries carry auto_tuning too.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-json");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = concat!(
+        "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"grep\",\"args\":\"\",\"tokens_saved\":0,\"tokens_raw\":0,\"lines_raw\":0,\"lines_final\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":1,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"expand_tail_err\"}\n",
+        "{\"ts\":\"2026-06-05T10:01:00Z\",\"cmd\":\"seq\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":500,\"lines_final\":60,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"decay_moderate\"}\n",
+        "{\"ts\":\"2026-06-05T10:02:00Z\",\"cmd\":\"seq\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":500,\"lines_final\":60,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"decay_strong\"}\n",
+        "{\"ts\":\"2026-06-05T10:03:00Z\",\"cmd\":\"cat\",\"args\":\"\",\"tokens_saved\":0,\"tokens_raw\":100,\"lines_raw\":10,\"lines_final\":10,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\"}\n",
+    );
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
+
+    // Top-level auto_tuning object.
+    let at = v.get("auto_tuning").expect("auto_tuning key present");
+    assert_eq!(at["firings"].as_u64(), Some(3));
+    assert_eq!(at["expand_tail_err"].as_u64(), Some(1));
+    assert_eq!(at["decay_moderate"].as_u64(), Some(1));
+    assert_eq!(at["decay_strong"].as_u64(), Some(1));
+    // grep record had exit=1 + lines_raw=0 → 1 noisy.
+    assert_eq!(at["noisy"].as_u64(), Some(1));
+
+    // Per-command auto_tuning blocks.
+    let cmds = v["commands"].as_array().expect("commands array");
+    let grep = cmds
+        .iter()
+        .find(|c| c["command"] == "grep")
+        .expect("grep entry");
+    assert_eq!(grep["auto_tuning"]["firings"].as_u64(), Some(1));
+    assert_eq!(grep["auto_tuning"]["noisy"].as_u64(), Some(1));
+    let cat = cmds
+        .iter()
+        .find(|c| c["command"] == "cat")
+        .expect("cat entry");
+    assert_eq!(cat["auto_tuning"]["firings"].as_u64(), Some(0));
+
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn auto_tuning_handles_backcompat_mixed_old_and_new_records() {
+    // The metrics file in the wild is a long-lived JSONL: it contains many
+    // pre-0.1.10 records without an `adaptive_event` field plus new records
+    // that carry it. --stats must (a) count all rows in total_runs, (b)
+    // count only the new tagged rows in firings, (c) never panic.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-backcompat");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = concat!(
+        // OLD records — no adaptive_event field at all.
+        "{\"ts\":\"2026-06-01T10:00:00Z\",\"cmd\":\"cargo\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":50,\"lines_final\":10,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.9\"}\n",
+        "{\"ts\":\"2026-06-01T10:01:00Z\",\"cmd\":\"cargo\",\"args\":\"\",\"tokens_saved\":800,\"tokens_raw\":1000,\"lines_raw\":50,\"lines_final\":10,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":1,\"duration_ms\":5,\"version\":\"0.1.9\"}\n",
+        // NEW records — with adaptive_event.
+        "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":50,\"lines_final\":10,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"decay_moderate\"}\n",
+        "{\"ts\":\"2026-06-05T10:01:00Z\",\"cmd\":\"cargo\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":50,\"lines_final\":10,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"decay_strong\"}\n",
+    );
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stats must not panic on mixed file");
+    let v: serde_json::Value =
+        serde_json::from_str(&out.stdout.iter().map(|&b| b as char).collect::<String>())
+            .expect("valid JSON");
+    assert_eq!(
+        v["total_runs"].as_u64(),
+        Some(4),
+        "all 4 rows count toward runs"
+    );
+    assert_eq!(
+        v["auto_tuning"]["firings"].as_u64(),
+        Some(2),
+        "only the 2 tagged rows count as firings"
+    );
+    assert_eq!(v["auto_tuning"]["decay_moderate"].as_u64(), Some(1));
+    assert_eq!(v["auto_tuning"]["decay_strong"].as_u64(), Some(1));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step5_persistence_compounds_decay_across_runs() {
+    // E2E proof of compounding: run the same command enough times that decay
+    // fires 3 times in a row. Without persistence the rule shrinks from
+    // defaults each time (30→24, 30→24, 30→24). With persistence it
+    // compounds (30→24→19→11), and the head/tail in the truncation banner
+    // shows the progression.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step5-compound");
+
+    // Run 1-3: build up history (3 truncated successes — below trigger).
+    for _ in 0..3 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "seq", "1", "200"])
+            .output()
+            .unwrap();
+    }
+    // Run 4: 3 prior truncated → decay_moderate fires, 30→24, saved.
+    let r4 = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "seq", "1", "200"])
+        .output()
+        .unwrap();
+    let s4 = String::from_utf8_lossy(&r4.stdout);
+    assert!(
+        s4.contains("[Showing 24 head + 24 tail of 200 lines]"),
+        "run 4 should land at 24/24: {s4}"
+    );
+
+    // Run 5: cached (24,24) → decay_moderate (still 3-4 priors) → 24*0.8=19.
+    let r5 = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "seq", "1", "200"])
+        .output()
+        .unwrap();
+    let s5 = String::from_utf8_lossy(&r5.stdout);
+    assert!(
+        s5.contains("[Showing 19 head + 19 tail of 200 lines]"),
+        "run 5 compounds from 24 to 19: {s5}"
+    );
+
+    // Run 6: cached (19,19), 5 priors → decay_strong → 19*0.6=11.
+    let r6 = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "seq", "1", "200"])
+        .output()
+        .unwrap();
+    let s6 = String::from_utf8_lossy(&r6.stdout);
+    assert!(
+        s6.contains("[Showing 11 head + 11 tail of 200 lines"),
+        "run 6 compounds from 19 to 11: {s6}"
+    );
+
+    // The tuned.jsonl sidecar must carry the bucket's tune.
+    let tuned = xdg.join("l0-cache").join("tuned.jsonl");
+    assert!(tuned.exists(), "tuned.jsonl should exist at {tuned:?}");
+    let body = std::fs::read_to_string(&tuned).unwrap();
+    // At least one record must show head=11 (the most-recent compound).
+    assert!(
+        body.contains("\"head\":11"),
+        "tuned.jsonl should record head=11: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step5_persistence_bucket_isolation_via_args_hash() {
+    // Two distinct (cmd, args_hash) buckets must have INDEPENDENT tunes —
+    // shrinking bucket A doesn't bleed onto bucket B's defaults.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step5-iso");
+
+    // Drive bucket A through 4 truncated successes → decay_moderate fires
+    // once and persists (24, 24).
+    for _ in 0..4 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "seq", "1", "200"])
+            .output()
+            .unwrap();
+    }
+
+    // Bucket B (different args, same cmd) — fresh history, no cached tune
+    // means it must start from system defaults (30, 30).
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "seq", "1", "300"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("[Showing 30 head + 30 tail of 300 lines]"),
+        "bucket B is fresh — should use defaults 30/30, not bucket A's tune: {s}"
+    );
+
+    // tuned.jsonl should carry bucket A's tune; bucket B isn't persisted
+    // because it didn't fire any rule.
+    let tuned = std::fs::read_to_string(xdg.join("l0-cache").join("tuned.jsonl")).unwrap();
+    // Bucket B's args_hash should NOT appear (no firing → no persistence).
+    let mut a_count = 0;
+    let mut b_count = 0;
+    let h_a = {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in "1 200".as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("{:08x}", h as u32)
+    };
+    let h_b = {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in "1 300".as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("{:08x}", h as u32)
+    };
+    for line in tuned.lines() {
+        if line.contains(&h_a) {
+            a_count += 1;
+        }
+        if line.contains(&h_b) {
+            b_count += 1;
+        }
+    }
+    assert!(a_count > 0, "bucket A should be persisted");
+    assert_eq!(b_count, 0, "bucket B should NOT be persisted (no firing)");
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step4_decay_steady_fires_on_seeded_mixed_window() {
+    // 16/20 truncated + 4 non-truncated at the most-recent end → the
+    // consecutive-streak decay rule sees streak=0 and skips, but
+    // decay_steady catches the steady-state pattern.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step4-steady");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let args_hash = {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in "hi".as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("{:08x}", h as u32)
+    };
+
+    let mut body = String::new();
+    for _ in 0..16 {
+        body.push_str(&format!(
+            "{{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cat\",\"args\":\"hi\",\"bytes_raw\":500,\"bytes_final\":300,\"lines_raw\":100,\"lines_final\":80,\"tokens_raw\":125,\"tokens_final\":75,\"tokens_saved\":50,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"args_hash\":\"{args_hash}\"}}\n"
+        ));
+    }
+    for _ in 0..4 {
+        body.push_str(&format!(
+            "{{\"ts\":\"2026-06-05T10:01:00Z\",\"cmd\":\"cat\",\"args\":\"hi\",\"bytes_raw\":250,\"bytes_final\":250,\"lines_raw\":50,\"lines_final\":50,\"tokens_raw\":62,\"tokens_final\":62,\"tokens_saved\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"args_hash\":\"{args_hash}\"}}\n"
+        ));
+    }
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    // Run cat with non-existent file that produces "hi" path → use `echo hi`
+    // instead so the args_hash actually matches what main computes.
+    let _ = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "cat", "hi"])
+        .output()
+        .unwrap();
+
+    let final_body = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+    let last_line = final_body.lines().last().expect("at least one line");
+    assert!(
+        last_line.contains("\"adaptive_event\":\"decay_steady\""),
+        "last line should carry decay_steady: {last_line}"
+    );
+
+    // --stats counts the firing under the right event.
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert_eq!(v["auto_tuning"]["decay_steady"].as_u64(), Some(1));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step3_proactive_shrink_fires_on_seeded_clean_history() {
+    // Seed metrics.jsonl with 25 clean records for a single bucket; the next
+    // real run must (a) write adaptive_event=proactive_shrink, and (b) be
+    // run with a smaller head/tail than the default. Verify the JSONL record
+    // carries the new event.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step3-shrink");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Compute the args_hash for the args we will use below so the seeded
+    // history matches the next run's bucket. The args string is built by
+    // cmd_args_string, which for `l0-cache echo hi` is `"hi"`.
+    let args_hash = {
+        // FNV-1a 64-bit, low 32 bits as 8 hex chars — must match production.
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in "hi".as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("{:08x}", h as u32)
+    };
+
+    let mut body = String::new();
+    for _ in 0..25 {
+        body.push_str(&format!(
+            "{{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"echo\",\"args\":\"hi\",\"bytes_raw\":3,\"bytes_final\":3,\"lines_raw\":1,\"lines_final\":1,\"tokens_raw\":1,\"tokens_final\":1,\"tokens_saved\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":1,\"version\":\"0.1.10\",\"args_hash\":\"{args_hash}\"}}\n"
+        ));
+    }
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    // Real run with the matching bucket.
+    let _ = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "echo", "hi"])
+        .output()
+        .unwrap();
+
+    // The 26th JSONL line — appended by the run we just made — must carry
+    // adaptive_event=proactive_shrink.
+    let final_body = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+    let last_line = final_body.lines().last().expect("at least one line");
+    assert!(
+        last_line.contains("\"adaptive_event\":\"proactive_shrink\""),
+        "last line should carry proactive_shrink: {last_line}"
+    );
+
+    // --stats surfaces it under the new event row.
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert_eq!(v["auto_tuning"]["proactive_shrink"].as_u64(), Some(1));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step3_does_not_fire_with_short_history() {
+    // 5 clean records — below MIN=20 → no event.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step3-short");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args_hash = {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in "hi".as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        format!("{:08x}", h as u32)
+    };
+    let mut body = String::new();
+    for _ in 0..5 {
+        body.push_str(&format!(
+            "{{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"echo\",\"args\":\"hi\",\"bytes_raw\":3,\"bytes_final\":3,\"lines_raw\":1,\"lines_final\":1,\"tokens_raw\":1,\"tokens_final\":1,\"tokens_saved\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":1,\"version\":\"0.1.10\",\"args_hash\":\"{args_hash}\"}}\n"
+        ));
+    }
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+    let _ = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "echo", "hi"])
+        .output()
+        .unwrap();
+    let final_body = std::fs::read_to_string(dir.join("metrics.jsonl")).unwrap();
+    let last_line = final_body.lines().last().expect("at least one line");
+    assert!(
+        !last_line.contains("\"adaptive_event\""),
+        "should not fire: {last_line}"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step2_args_hash_lands_in_jsonl_per_run() {
+    // Each run writes an args_hash field; different args produce different
+    // hashes. This is the load-bearing serialization test.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step2-jsonl");
+
+    let _ = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "sh", "-c", "echo one"])
+        .output()
+        .unwrap();
+    let _ = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "sh", "-c", "echo two"])
+        .output()
+        .unwrap();
+
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let body = std::fs::read_to_string(&metrics).expect("metrics exist");
+    let mut hashes: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        let h = v["args_hash"]
+            .as_str()
+            .expect("args_hash present")
+            .to_string();
+        assert_eq!(h.len(), 8, "8-char hex: {h}");
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "hex: {h}");
+        hashes.push(h);
+    }
+    assert_eq!(hashes.len(), 2);
+    assert_ne!(hashes[0], hashes[1], "different args → different hashes");
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step2_bucket_isolates_failure_streak_across_distinct_args() {
+    // Counter-test of bucket isolation, end-to-end through the binary.
+    // Bucket A accumulates 3 real failures; bucket B (same cmd, different
+    // args) is then introduced. Bucket B's first run must NOT inherit
+    // bucket A's expand streak.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step2-isolation");
+
+    // 3 real failures in bucket A (same args every time).
+    for _ in 0..3 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
+            .output()
+            .unwrap();
+    }
+
+    // Now run a DIFFERENT-args command (bucket B). Expect: NO auto-tuning
+    // warning on stderr, because bucket B's history is empty.
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--auto", "sh", "-c", "seq 1 50; exit 1"])
+        .output()
+        .unwrap();
+    let stderr_str = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr_str.contains("auto-tuning"),
+        "bucket B should not inherit bucket A's streak: {stderr_str}"
+    );
+
+    // JSONL records show two DISTINCT args_hash values. (cmd_name extracts
+    // the first word from `sh -c "<cmd> …"`, so both bucket A and B end up
+    // with cmd="seq" — that's fine; bucketing is by args_hash, not cmd.)
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let body = std::fs::read_to_string(&metrics).expect("metrics exist");
+    let mut hashes = std::collections::HashSet::new();
+    for line in body.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).expect("JSON");
+        if let Some(h) = v["args_hash"].as_str() {
+            hashes.insert(h.to_string());
+        }
+    }
+    assert!(
+        hashes.len() >= 2,
+        "expected ≥2 distinct args_hash values across runs: {hashes:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step2_same_args_keeps_same_bucket_and_still_fires() {
+    // Regression guard: bucketing must not break the within-bucket learning.
+    // Same args 3 times in a row → bucket sees streak=2 on run #3, expand
+    // fires (factor=3) → adaptive_event=expand_tail_err in the JSONL.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step2-same-bucket");
+
+    for _ in 0..3 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
+            .output()
+            .unwrap();
+    }
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let body = std::fs::read_to_string(&metrics).expect("metrics exist");
+    assert!(
+        body.contains("\"adaptive_event\":\"expand_tail_err\""),
+        "within-bucket learning must still fire: {body}"
+    );
+    // All records share one args_hash (same args every time).
+    let mut hashes = std::collections::HashSet::new();
+    for line in body.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).expect("JSON");
+        if let Some(h) = v["args_hash"].as_str() {
+            hashes.insert(h.to_string());
+        }
+    }
+    assert_eq!(hashes.len(), 1, "single bucket: {hashes:?}");
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn step2_backcompat_pre_step2_records_dont_break_aggregation() {
+    // Mixed file: pre-Step-2 records without args_hash + new records with
+    // args_hash. --stats must aggregate all of them under their `cmd` column
+    // and never panic — the args_hash bucketing is invisible at this layer.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("step2-backcompat");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = concat!(
+        // OLD: no args_hash, no adaptive_event.
+        "{\"ts\":\"2026-06-01T10:00:00Z\",\"cmd\":\"cargo\",\"args\":\"test\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":50,\"lines_final\":10,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.9\"}\n",
+        // NEW: with args_hash, with adaptive_event.
+        "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"args\":\"test\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":50,\"lines_final\":10,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"decay_moderate\",\"args_hash\":\"a1b2c3d4\"}\n",
+        "{\"ts\":\"2026-06-05T10:01:00Z\",\"cmd\":\"cargo\",\"args\":\"build\",\"tokens_saved\":100,\"tokens_raw\":200,\"lines_raw\":30,\"lines_final\":10,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"args_hash\":\"e5f60718\"}\n",
+    );
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stats must not panic on mixed file");
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    // All 3 rows counted in total_runs.
+    assert_eq!(v["total_runs"].as_u64(), Some(3));
+    // Only the new record carries adaptive_event=decay_moderate.
+    assert_eq!(v["auto_tuning"]["firings"].as_u64(), Some(1));
+    assert_eq!(v["auto_tuning"]["decay_moderate"].as_u64(), Some(1));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn auto_tuning_step1_skips_expand_on_empty_failures() {
+    // Real binary, real command: run something that fails with zero output
+    // (the canonical no-match case) several times. Before Step 1, the second
+    // run would trigger `expand_tail_err`; after Step 1, the rule sees only
+    // noisy history → never fires → adaptive_event remains absent on every
+    // record, --stats shows 0 firings for that command.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-step1-skip");
+
+    // `false` is the canonical exit=1 with zero stdout/stderr command.
+    for _ in 0..4 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "false"])
+            .output()
+            .unwrap();
+    }
+
+    // No metric in the JSONL must carry an adaptive_event tag — the rule
+    // never fired because every history entry is noisy.
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let body = std::fs::read_to_string(&metrics).expect("metrics exist");
+    assert!(
+        !body.contains("\"adaptive_event\""),
+        "Step 1 should suppress the rule; got: {body}"
+    );
+
+    // --stats --json: auto_tuning.firings == 0, noisy == 0.
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert_eq!(v["auto_tuning"]["firings"].as_u64(), Some(0));
+    assert_eq!(v["auto_tuning"]["noisy"].as_u64(), Some(0));
+    // ...but the runs still count toward total_runs (we didn't drop telemetry).
+    assert!(v["total_runs"].as_u64().unwrap() >= 4);
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn auto_tuning_step1_still_fires_on_real_failures_with_output() {
+    // Counter-test: a failing command that DOES produce output must still
+    // trigger expand. This is the regression guard — Step 1 only filters
+    // noisy entries, it doesn't disable the rule.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-step1-keep");
+
+    // Produces 200 lines then fails — real failure, lines_raw > 0.
+    for _ in 0..3 {
+        let _ = Command::new(&t_bin)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
+            .output()
+            .unwrap();
+    }
+
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let body = std::fs::read_to_string(&metrics).expect("metrics exist");
+    assert!(
+        body.contains("\"adaptive_event\":\"expand_tail_err\""),
+        "real failure with output should still fire: {body}"
+    );
+
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert!(
+        v["auto_tuning"]["firings"].as_u64().unwrap() > 0,
+        "expected real failures to fire expand; got {}",
+        v["auto_tuning"]
+    );
+    // And the "real failure" runs produced output, so they aren't noisy.
+    assert_eq!(v["auto_tuning"]["noisy"].as_u64(), Some(0));
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn auto_tuning_noisy_counter_only_marks_empty_failure_expansions() {
+    // The noisy counter exists to flag false-positive expansions: the
+    // `expand_tail_err` rule fired on a failing run with zero output (think
+    // grep "no match"). Decay events are never noisy; expansions on failing
+    // runs that DID produce output are not noisy either.
+    let t_bin = get_t_bin();
+    let xdg = temp_xdg("autotune-noisy");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = concat!(
+        // NOISY: expand_tail_err + exit!=0 + lines_raw==0.
+        "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"grep\",\"args\":\"\",\"tokens_saved\":0,\"tokens_raw\":0,\"lines_raw\":0,\"lines_final\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":1,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"expand_tail_err\"}\n",
+        // NOT noisy: expand_tail_err but produced output.
+        "{\"ts\":\"2026-06-05T10:01:00Z\",\"cmd\":\"make\",\"args\":\"\",\"tokens_saved\":0,\"tokens_raw\":500,\"lines_raw\":120,\"lines_final\":80,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":2,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"expand_tail_err\"}\n",
+        // NOT noisy: decay_moderate (decay is never noisy by definition).
+        "{\"ts\":\"2026-06-05T10:02:00Z\",\"cmd\":\"seq\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":500,\"lines_final\":60,\"truncated\":true,\"strategy\":\"head_tail\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"decay_moderate\"}\n",
+        // NOT noisy: expand_tail_err with exit_code=0 (impossible in prod —
+        // the rule only fires on failures — but defensive: we don't want a
+        // forged record to be classified as noisy).
+        "{\"ts\":\"2026-06-05T10:03:00Z\",\"cmd\":\"ok\",\"args\":\"\",\"tokens_saved\":0,\"tokens_raw\":0,\"lines_raw\":0,\"lines_final\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"expand_tail_err\"}\n",
+    );
+    std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
+
+    let out = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--stats", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid JSON");
+    assert_eq!(
+        v["auto_tuning"]["firings"].as_u64(),
+        Some(4),
+        "all four rule-firing rows count"
+    );
+    assert_eq!(
+        v["auto_tuning"]["noisy"].as_u64(),
+        Some(1),
+        "only the grep row is noisy"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
 }

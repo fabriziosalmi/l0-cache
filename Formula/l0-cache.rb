@@ -12,7 +12,9 @@
 class L0Cache < Formula
   desc "CLI proxy that cuts LLM token use via universal output filtering"
   homepage "https://github.com/fabriziosalmi/l0-cache"
-  url "https://github.com/fabriziosalmi/l0-cache/archive/refs/tags/v0.1.9.tar.gz"
+  url "https://github.com/fabriziosalmi/l0-cache/archive/refs/tags/v0.1.10.tar.gz"
+  # NOTE: sha256 must be regenerated after the v0.1.10 tag is pushed.
+  # Compute with: curl -sL <url-above> | shasum -a 256
   sha256 "963f203c5793e766453b71ce1287d8ec9803ef4b3856a33f9d70167d89573ce1"
   license "MIT"
   head "https://github.com/fabriziosalmi/l0-cache.git", branch: "master"

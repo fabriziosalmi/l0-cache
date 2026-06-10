@@ -46,27 +46,46 @@ output, to break interactive-prompt deadlocks. `0` (default) disables it.
 
 ### Adaptive Tuning
 
-Adaptive parameter auto-tuning is enabled by default.
+Adaptive parameter auto-tuning is enabled by default. Five rules tune `head`,
+`tail`, and `tail_error` per `(cmd, args_hash)` bucket — see
+[the Configuration guide](../guide/configuration.md#parameter-auto-tuning-enabled-by-default)
+for the full semantics, and the `AUTO-TUNING` section of `--stats` (plus
+the `auto_tuning` object in `--stats --json`) for what's firing in your
+sessions.
+
+Each rule firing is appended to a small sidecar at
+`$XDG_DATA_HOME/l0-cache/tuned.jsonl`, which the learner reads on the next
+run of the same bucket so the decay/shrink rules **compound** across runs
+instead of resetting from CLI defaults each time. Delete this file to reset
+all learned tunes.
 
 #### `--no-auto`
-Disable adaptive auto-tuning of parameters.
+Disable adaptive auto-tuning. The learner also stops reading and writing
+`tuned.jsonl` for this run.
 
 #### `--auto`
 Enable adaptive auto-tuning (redundant as it is now enabled by default, but supported for backward compatibility).
 
 #### `--auto-floor <N>`
-Floor limit for success optimization decay. Default: 10.
+Floor limit for the decay rules (`decay_moderate`, `decay_strong`,
+`decay_steady`) and `proactive_shrink`. The tuned `head`/`tail` is never
+allowed below this. Default: 10.
 
 #### `--auto-ceiling <N>`
-Ceiling limit for failure backoff tail expansion. Default: 1000.
+Ceiling limit for failure-backoff `tail_error` expansion
+(`expand_tail_err`). Default: 1000.
 
 ### Metrics
 
 #### `--stats`
 Print an aggregated token savings report and exit. Does not run a command.
-Renders a boxed dashboard (runs, tokens saved, per-command efficiency and bars).
-Color is emitted only on a TTY; piping, redirecting, or `NO_COLOR` yields plain
-text, and `FORCE_COLOR` forces it on.
+Renders a boxed dashboard (runs, tokens saved, per-command efficiency and bars)
+followed by an `AUTO-TUNING` section: total adaptive firings, per-event
+breakdown (`expand_tail_err`, `decay_moderate`, `decay_strong`,
+`proactive_shrink`, `decay_steady`), a `noisy` counter (expand firings that
+fired on zero-output runs — false-positive surface), and the top commands by
+firing count. Color is emitted only on a TTY; piping, redirecting, or
+`NO_COLOR` yields plain text, and `FORCE_COLOR` forces it on.
 
 #### `--since <DURATION>`
 Filter the stats report to entries within the given time window.
@@ -88,7 +107,8 @@ estimated cost saved (and `usd_saved` appears in `--json`). Default: 0 (hidden).
 
 #### `--reset-stats`
 Delete **all** recorded telemetry (the `metrics.jsonl` file) and exit. This is
-destructive and cannot be undone.
+destructive and cannot be undone. **Does not** touch `tuned.jsonl` — delete
+that file separately if you also want to drop the persisted adaptive tunes.
 
 #### `--token-factor <N>`
 Divisor used for token estimation. The number of bytes is divided by this factor to estimate the token count. Default: 4.

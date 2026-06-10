@@ -31,7 +31,8 @@ it through a streaming pipeline, and prints the result.
                     |         |           |
                     |  +------v--------+  |
                     |  | metrics.jsonl |  |  (O_APPEND, 0600)
-                    |  +---------------+  |
+                    |  | tuned.jsonl   |  |  (per-bucket adaptive tune,
+                    |  +---------------+  |   read at start, append on firing)
                     +---------------------+
 ```
 
@@ -54,7 +55,7 @@ output order, drained synchronously from the main thread.
 | `args` | `src/args.rs` | CLI argument parsing via clap |
 | `filter` | `src/filter.rs` | ANSI strip, collapse, squeeze, head/tail buffer |
 | `runner` | `src/runner.rs` | Process spawning, line reading, exit code |
-| `telemetry` | `src/telemetry.rs` | JSONL metrics, stats reporting |
+| `telemetry` | `src/telemetry/mod.rs` | JSONL metrics, stats reporting, adaptive learner + `tuned.jsonl` |
 | `main` | `src/main.rs` | Orchestration, signal handling, output writing |
 
 ## Execution Modes

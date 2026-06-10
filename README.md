@@ -58,10 +58,15 @@ around* the filtering.
 | Stats: dashboard / `--discover` / JSON | ✅ | ✅ | ✅ | partial |
 | New runtime dependencies | none | none | none (Go) | — |
 
-**Uniquely ours:** failure-backoff / success-decay auto-tuning that reacts to exit
-codes, a guard that blocks `rm -rf /` / reverse shells / credential exfiltration /
-`DROP DATABASE`, systematic credential redaction in telemetry, and tested hardening
-(bounded memory, signal/process-group forwarding, OOM caps).
+**Uniquely ours:** five-rule adaptive auto-tuning that learns per
+`(cmd, args_hash)` bucket (failure backoff, two consecutive-decay tiers,
+proactive shrink on long clean histories, steady-state decay on window-adaptive
+truncation rate) and **persists** tuned `(head, tail, tail_error)` between
+runs so the learning compounds — see [Adaptive
+auto-tuning](#adaptive-auto-tuning). Plus a guard that blocks `rm -rf /` /
+reverse shells / credential exfiltration / `DROP DATABASE`, systematic
+credential redaction in telemetry, and tested hardening (bounded memory,
+signal/process-group forwarding, OOM caps).
 
 **Where the others win:** deeper per-command semantic output (e.g. grouped test
 failures) and a longer list of pre-wired agents. For maximum ratio on a fixed set
@@ -191,7 +196,9 @@ l0-cache --token-factor 8 cargo test
 ## Telemetry Dashboard
 
 `l0-cache --stats` renders an aggregated savings report — total runs, tokens
-saved, and per-command efficiency with proportional bars:
+saved, per-command efficiency with proportional bars, and an `AUTO-TUNING`
+section that reports per-event firing counts plus a `noisy` counter (failure
+expansions that fired on zero-output runs — the false-positive surface):
 
 ```
 ┌─ l0-cache TELEMETRY ───────────────────────────────── last 7d ─┐
@@ -203,13 +210,53 @@ saved, and per-command efficiency with proportional bars:
 │ cargo         15    8.2k   78.5% █████████░░░  ↑ best          │
 │ git           12    3.1k   65.3% ████████░░░░                  │
 │ npm            8    1.2k   54.2% ██████░░░░░░                  │
+├────────────────────────────────────────────────────────────────┤
+│ AUTO-TUNING                                                    │
+│ Firings      8   22.9% of 35 runs                              │
+│   expand_tail_err    1   decay_mod   2   decay_strong   3      │
+│   proactive_shrink   1   decay_steady   1                      │
+│   noisy       0   0.0% of firings                              │
+│ Top cmds (by firings)                                          │
+│   cargo       5    Dm:2 Ds:3                                   │
+│   git         2    Dsy:1 P:1                                   │
+│   npm         1    E:1                                         │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+Add `--json` to emit the same data as a single object (including the
+`auto_tuning` block) for tooling.
 
 `--doctor` shares the same boxed visual language for its health report. Color is
 emitted only on an interactive terminal — piping or redirecting (or setting
 `NO_COLOR`) yields clean, escape-free text; `FORCE_COLOR=1` forces it on for CI
 captures.
+
+## Adaptive auto-tuning
+
+Enabled by default; disable with `--no-auto`. Five rules adjust `head`,
+`tail`, and `tail_error` per `(cmd, args_hash)` bucket, where `args_hash` is
+an FNV-1a hash of the (redacted) args string — so `curl https://api.x.com`
+and `curl https://api.y.com` learn independently.
+
+| Event tag | When it fires | What it does |
+|---|---|---|
+| `expand_tail_err` | ≥1 consecutive recent failure with `lines_raw > 0` | Grows `tail_error` by `(1 + streak) ×`, capped by `--auto-ceiling` (default 1000). |
+| `decay_moderate` | 3-4 consecutive truncated successes | Shrinks `head` and `tail` by 20%, floored by `--auto-floor` (default 10). |
+| `decay_strong` | 5+ consecutive truncated successes | Shrinks `head` and `tail` by 40%, same floor. |
+| `proactive_shrink` | ≥20 records in the bucket, all clean (success + not truncated), `max(lines_raw) + 5` ≤ half the current head+tail budget | Sets `head = max(lines_raw) + 5`, `tail = default_tail / 4`. Max-based: never introduces a new truncation vs. observed history. |
+| `decay_steady` | ≥20 records in the bucket, all success, ≥80% truncated | Shrinks `head` and `tail` by 30%. Complements `decay_moderate/strong`: catches steady-state truncation when the streak is broken by occasional non-truncated runs. |
+
+A failing run with **zero output** (e.g. `grep` "no match", `find` "not
+found") does **not** grow the `expand_tail_err` streak — its failure mode is
+not the kind that extra error context would help with. The `noisy` counter
+in `--stats` tracks any past firings that did happen on such runs.
+
+Each firing is **persisted** to `$XDG_DATA_HOME/l0-cache/tuned.jsonl` keyed
+by `(cmd, args_hash)`. The next run of the same bucket starts from the saved
+`(head, tail, tail_error)` instead of the CLI defaults — so the decay rules
+compound: one bucket's `head` can shrink 30 → 24 → 19 → 11 → 10 (`--auto-floor`)
+over four firings. Best-effort I/O; a missing or corrupt `tuned.jsonl`
+degrades silently to the no-persistence behavior.
 
 ## Per-command configuration (optional)
 
@@ -385,7 +432,7 @@ Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
 
 ```json
 {
-  "ts": "2024-01-15T10:30:00Z",
+  "ts": "2026-06-10T10:30:00Z",
   "cmd": "cargo",
   "args": "test --all",
   "bytes_raw": 15000,
@@ -399,14 +446,26 @@ Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
   "strategy": "head_tail",
   "exit_code": 0,
   "duration_ms": 1234,
-  "version": "0.1.0"
+  "version": "0.1.10",
+  "adaptive_event": "decay_moderate",
+  "args_hash": "a1b2c3d4"
 }
 ```
+
+`adaptive_event` and `args_hash` are present from 0.1.10 on and may be absent
+(both fields are `Option<String>` with `skip_serializing_if = None`); older
+records parse cleanly without them.
+
+The adaptive learner also reads/writes a small sidecar at
+`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per firing, keyed by
+`(cmd, args_hash)`. See [Adaptive auto-tuning](#adaptive-auto-tuning).
 
 Data directory resolution: `$XDG_DATA_HOME/l0-cache/` then `$HOME/.local/share/l0-cache/`
 then `/etc/passwd` lookup (for containers, cron, systemd).
 
-File permissions are set to 0600. Auto-rotation at 10 MB.
+File permissions are set to 0600. `metrics.jsonl` auto-rotates at 10 MB
+(entries older than 30 days are pruned at rotation); `tuned.jsonl` grows
+one line per firing and is left to the user to inspect or delete.
 
 ## Cross-Platform Support
 
@@ -483,7 +542,7 @@ environments:
 ## Development
 
 ```sh
-cargo test           # 186 tests (unit + E2E integration)
+cargo test           # 254 unit + 38 E2E integration tests
 cargo clippy         # 0 warnings enforced
 cargo build --release
 ```

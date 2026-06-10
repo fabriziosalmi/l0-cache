@@ -131,15 +131,35 @@ fn main() {
     let only_errors = args.only_errors || ov.only_errors.unwrap_or(false);
     let recover = args.recover || ov.recover.unwrap_or(false);
 
+    // Tracks which auto-tuning rule branch fired this run (None if disabled or
+    // no rule matched), so the metric written below records it for `--stats`.
+    let mut adaptive_event: Option<&'static str> = None;
+    // Per-bucket key for the learner: derived from the redacted args string
+    // exactly once so the value we pass to the learner is the same value we
+    // serialize into the metric record.
+    let args_str = args.cmd_args_string();
+    let bucket_key = telemetry::args_hash(&args_str);
     if !args.no_auto {
+        // Step 5 — seed from persisted tune. If this bucket has been tuned
+        // before, the learner runs against THOSE values, not the CLI defaults.
+        // This is what makes the decay/shrink rules COMPOUND across runs
+        // ("apprendimento incrementale") instead of resetting every time.
+        // Floored values are still bounded by auto_floor / auto_ceiling.
+        if let Some(prior) = telemetry::lookup_tuned(&args.cmd_name(), &bucket_key) {
+            head = prior.head;
+            tail = prior.tail;
+            tail_error = prior.tail_error;
+        }
         let tuned = telemetry::get_adaptive_params(
             &args.cmd_name(),
+            &bucket_key,
             head,
             tail,
             tail_error,
             args.auto_floor,
             args.auto_ceiling,
         );
+        adaptive_event = tuned.event;
         if tuned.modified {
             if let Some(reason) = &tuned.reason {
                 if !args.quiet {
@@ -149,6 +169,24 @@ fn main() {
             head = tuned.head;
             tail = tuned.tail;
             tail_error = tuned.tail_error;
+            // Step 5 — persist this firing so the next invocation of the same
+            // bucket starts from here. Only persist on actually-modified
+            // params (the Step 0 honesty distinction holds: a no-op trigger
+            // does not change state).
+            if let Some(event_tag) = tuned.event {
+                telemetry::save_tuned(
+                    &telemetry::TunedParams {
+                        ts: telemetry::rfc3339_now_for_pub(),
+                        cmd: args.cmd_name(),
+                        args_hash: bucket_key.clone(),
+                        head,
+                        tail,
+                        tail_error,
+                        event: event_tag.to_string(),
+                    },
+                    args.quiet,
+                );
+            }
         }
     }
 
@@ -208,7 +246,7 @@ fn main() {
             let metric = telemetry::ExecutionMetric::from_run_with_factor(
                 telemetry::RunMetrics {
                     cmd: &args.cmd_name(),
-                    args: &args.cmd_args_string(),
+                    args: &args_str,
                     bytes_raw: result.filter_result.bytes_raw,
                     bytes_final: result.filter_result.bytes_final,
                     lines_raw: result.filter_result.lines_raw,
@@ -217,6 +255,8 @@ fn main() {
                     strategy: result.strategy,
                     exit_code: result.exit_code,
                     duration_ms: result.duration_ms,
+                    adaptive_event,
+                    args_hash: Some(&bucket_key),
                 },
                 args.token_factor,
             );
