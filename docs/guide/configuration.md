@@ -91,7 +91,7 @@ don't pollute each other.
 
 ### Rules
 
-Five rules feed off the same per-bucket history. The first one whose
+Six rules feed off the same per-bucket history. The first one whose
 trigger matches wins (top-to-bottom precedence).
 
 1. **`expand_tail_err` — anti-loop backoff**. If the last F consecutive
@@ -108,22 +108,38 @@ trigger matches wins (top-to-bottom precedence).
 3. **`decay_strong` — 5+ consecutive truncated successes**. Shrink `head`
    and `tail` by 40% (same floor).
 
-4. **`decay_steady` — window-adaptive**. If the bucket has ≥20 records,
+4. **`recover_defaults` — the un-ratchet**. Every other rule only moves
+   `head`/`tail` down and `tail_error` up, compounding across runs. After
+   5 consecutive clean (successful, non-truncated) runs, a bucket sitting
+   below its configured base restores `head`/`tail` to base — unless the
+   tune was seeded by `proactive_shrink`, whose evidence a clean streak
+   *confirms* — and a `tail_error` expanded above base returns to base
+   once the failures stop. Both restores happen in one firing. Recovery
+   is strictly per `(cmd, args_hash)` bucket: the same bucket must start
+   producing clean runs (e.g. the same `cat <file>` over a now-smaller
+   file), not merely the same command with different args.
+
+5. **`decay_steady` — window-adaptive**. If the bucket has ≥20 records,
    all successful, and ≥80% of the last 20 are truncated, shrink `head`
    and `tail` by 30%. Catches the steady-state pattern that "5 consecutive"
    misses when occasional non-truncated runs break the streak.
 
-5. **`proactive_shrink` — long clean histories**. If the bucket has ≥20
+6. **`proactive_shrink` — long clean histories**. If the bucket has ≥20
    records, all clean (success + not truncated), and `max(lines_raw) + 5`
    is at most half the current `head + tail` budget, set
    `head = max(lines_raw) + 5` and `tail = default_tail / 4`. Max-based,
    so it never introduces a new truncation vs. observed history.
 
+A trigger whose numeric result equals the seeded values (floor/ceiling
+pinned) is **not** a firing: no event is recorded and nothing is persisted.
+
 ### Persistence (`tuned.jsonl`)
 
 Each time a rule fires (with a real change to `head`/`tail`/`tail_error`),
-the result is appended to `$XDG_DATA_HOME/l0-cache/tuned.jsonl`, keyed by
-`(cmd, args_hash)`. The next run of the same bucket starts from the saved
+the result is upserted into `$XDG_DATA_HOME/l0-cache/tuned.jsonl`, keyed by
+`(cmd, args_hash)` — the file is compacted on write to one line per bucket,
+and entries older than 30 days are pruned (an expired tune also stops
+seeding runs). The next run of the same bucket starts from the saved
 tune instead of the CLI defaults, so the decay/shrink rules **compound**:
 
 ```
@@ -133,9 +149,12 @@ run 6:  decay_strong   from cached  (19, 19)    → head=11 tail=11 saved
 run 7:  decay_strong   from cached  (11, 11)    → head=10 tail=10  (floor hit)
 ```
 
-The floor (`--auto-floor`) stops further compounding. Persistence is
-best-effort: a missing or unreadable `tuned.jsonl` silently degrades to
-the no-persistence behavior. Delete the file to reset all learned tunes.
+The floor (`--auto-floor`) stops further compounding — and once the
+workload changes, `recover_defaults` walks the bucket back to its base.
+Persistence is best-effort: a missing or unreadable `tuned.jsonl`
+silently degrades to the no-persistence behavior. `--reset-stats`
+deletes the file along with the metrics (or delete it by hand to reset
+all learned tunes).
 
 ### Diagnostic print
 

@@ -46,18 +46,20 @@ output, to break interactive-prompt deadlocks. `0` (default) disables it.
 
 ### Adaptive Tuning
 
-Adaptive parameter auto-tuning is enabled by default. Five rules tune `head`,
+Adaptive parameter auto-tuning is enabled by default. Six rules tune `head`,
 `tail`, and `tail_error` per `(cmd, args_hash)` bucket — see
 [the Configuration guide](../guide/configuration.md#parameter-auto-tuning-enabled-by-default)
 for the full semantics, and the `AUTO-TUNING` section of `--stats` (plus
 the `auto_tuning` object in `--stats --json`) for what's firing in your
 sessions.
 
-Each rule firing is appended to a small sidecar at
-`$XDG_DATA_HOME/l0-cache/tuned.jsonl`, which the learner reads on the next
-run of the same bucket so the decay/shrink rules **compound** across runs
-instead of resetting from CLI defaults each time. Delete this file to reset
-all learned tunes.
+Each rule firing is upserted into a small sidecar at
+`$XDG_DATA_HOME/l0-cache/tuned.jsonl` (compacted on write: one line per
+bucket, 30-day TTL), which the learner reads on the next run of the same
+bucket so the decay/shrink rules **compound** across runs instead of
+resetting from CLI defaults each time — and the `recover_defaults` rule
+walks a bucket back to its base once the workload changes. `--reset-stats`
+deletes the sidecar along with the metrics.
 
 #### `--no-auto`
 Disable adaptive auto-tuning. The learner also stops reading and writing
@@ -79,18 +81,39 @@ Ceiling limit for failure-backoff `tail_error` expansion
 
 #### `--stats`
 Print an aggregated token savings report and exit. Does not run a command.
-Renders a boxed dashboard (runs, tokens saved, per-command efficiency and bars)
-followed by an `AUTO-TUNING` section: total adaptive firings, per-event
-breakdown (`expand_tail_err`, `decay_moderate`, `decay_strong`,
-`proactive_shrink`, `decay_steady`), a `noisy` counter (expand firings that
-fired on zero-output runs — false-positive surface), and the top commands by
-firing count. Color is emitted only on a TTY; piping, redirecting, or
-`NO_COLOR` yields plain text, and `FORCE_COLOR` forces it on.
+Renders a boxed dashboard: runs, tokens saved (estimated as bytes ÷
+`--token-factor`, labeled `est. tokens`), the token-weighted efficiency gauge
+plus the unweighted `Median/run`, and — when one command holds more than 50%
+of all savings — a dominance disclosure line. The per-command table shows an
+`EFFIC.` percentage (`100.0%` is reserved for fully-elided output; near-misses
+floor at `99.9%`) and an `IMPACT` bar (share of total tokens saved,
+square-root scaled, colored by efficiency). Row markers: `↑ most saved` (top
+row), `⚠ low` (≥5 runs and <10% saved, or ≥5 runs with no output — same
+predicate as the footer hints and `--discover`), `(n<5)` (low efficiency but
+below the sample-size gate).
+
+An `AUTO-TUNING` section follows: total adaptive firings, per-event breakdown
+(`expand_tail_err`, `decay_moderate`, `decay_strong`, `proactive_shrink`,
+`decay_steady`, `recover_defaults`), a `noisy` counter (expand firings on
+zero-output runs — false-positive surface) annotated with the date of the
+last noisy firing, and the top commands by firing count with a legend for the
+mix abbreviations. Only firings that actually changed parameters are counted
+(a floor/ceiling-pinned trigger is not a firing). Color is emitted only on a
+TTY; piping, redirecting, or `NO_COLOR` yields plain text, and `FORCE_COLOR`
+forces it on. On a TTY the box width follows the terminal (the COMMAND column
+absorbs the extra space).
 
 #### `--since <DURATION>`
 Filter the stats report to entries within the given time window.
-Requires `--stats`. Format: `Nd`, `Nh`, `Nm`, `Ns` (e.g. `7d`, `24h`).
-Entries with an unparseable timestamp are excluded from a windowed query.
+Format: `Nd`, `Nh`, `Nm`, `Ns` (e.g. `7d`, `24h`). An unparseable value is
+an error (exit 2) in every mode — it used to be silently ignored while the
+header still claimed the window; passing a valid `--since` without
+`--stats`/`--discover` prints a "no effect" warning. Entries with an
+unparseable timestamp are excluded from a windowed query.
+
+> Commands whose name starts with `-` are rejected as unrecognized options
+> (almost always a typo'd flag). To wrap a genuinely dash-named executable,
+> use a path prefix: `l0-cache ./-weird-name`.
 
 #### `--discover`
 Print an opinionated optimization advisory from your metrics — which prefixed
@@ -106,9 +129,10 @@ USD per million tokens. When greater than 0, `--stats` and `--discover` show the
 estimated cost saved (and `usd_saved` appears in `--json`). Default: 0 (hidden).
 
 #### `--reset-stats`
-Delete **all** recorded telemetry (the `metrics.jsonl` file) and exit. This is
-destructive and cannot be undone. **Does not** touch `tuned.jsonl` — delete
-that file separately if you also want to drop the persisted adaptive tunes.
+Delete **all** recorded telemetry — both `metrics.jsonl` and the persisted
+adaptive tunes in `tuned.jsonl` — and exit. This is destructive and cannot be
+undone. (Leaving `tuned.jsonl` behind used to let stale adaptive state keep
+seeding runs while `--stats` reported no metrics.)
 
 #### `--token-factor <N>`
 Divisor used for token estimation. The number of bytes is divided by this factor to estimate the token count. Default: 4.
@@ -163,3 +187,11 @@ commands before executing them, exiting with code **126**:
 > The guard is a guard rail, not a sandbox: it pattern-matches argv and shell
 > payloads and can be bypassed by a determined caller. Bypass an intentional
 > command with `--no-guard`.
+
+### Disabling telemetry writes
+
+Set `L0_CACHE_NO_TELEMETRY=1` (accepts `1`/`true`/`yes`/`on`) to skip all
+writes to `metrics.jsonl` and `tuned.jsonl` for that invocation. Intended for
+test harnesses and benchmark scripts so synthetic runs never pollute the real
+stats (the integration suite also isolates via `XDG_DATA_HOME`); filtering and
+exit-code behavior are unaffected.

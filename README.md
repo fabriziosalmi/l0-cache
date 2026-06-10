@@ -203,25 +203,35 @@ expansions that fired on zero-output runs — the false-positive surface):
 ```
 ┌─ l0-cache TELEMETRY ───────────────────────────────── last 7d ─┐
 │ Runs        35                                                 │
-│ Saved       12.5k  of 17.4k raw                                │
-│ Efficiency   71.8%  █████████████████░░░░░░░                   │
+│ Saved       12.5k  of 17.4k raw · est. tokens                  │
+│ Efficiency   71.7%  █████████████████░░░░░░░                   │
+│ Median/run   65.2%  unweighted                                 │
+│             cargo accounts for 66% of savings                  │
 ├────────────────────────────────────────────────────────────────┤
 │ COMMAND     RUNS   SAVED  EFFIC. IMPACT                        │
-│ cargo         15    8.2k   78.5% █████████░░░  ↑ best          │
-│ git           12    3.1k   65.3% ████████░░░░                  │
-│ npm            8    1.2k   54.2% ██████░░░░░░                  │
+│ cargo         15    8.2k   78.4% ██████████░░  ↑ most saved    │
+│ git           12    3.1k   65.2% ██████░░░░░░                  │
+│ npm            8    1.2k   54.2% ████░░░░░░░░                  │
 ├────────────────────────────────────────────────────────────────┤
 │ AUTO-TUNING                                                    │
-│ Firings      8   22.9% of 35 runs                              │
+│ Firings     8  22.9% of 35 runs                                │
 │   expand_tail_err    1   decay_mod   2   decay_strong   3      │
-│   proactive_shrink   1   decay_steady   1                      │
-│   noisy       0   0.0% of firings                              │
+│   proactive_shrink     1   decay_steady   1   recover   0      │
+│   noisy     0   0.0% of firings                                │
 │ Top cmds (by firings)                                          │
-│   cargo       5    Dm:2 Ds:3                                   │
-│   git         2    Dsy:1 P:1                                   │
-│   npm         1    E:1                                         │
+│   cargo         5   Dm:2 Ds:3                                  │
+│   git           2   P:1 Dsy:1                                  │
+│   npm           1   E:1                                        │
+│   E=expand Dm/Ds/Dsy=decay P=shrink R=recover                  │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+The headline pairs the token-weighted **Efficiency** with the unweighted
+**Median/run**, and discloses when a single command holds >50% of the savings
+— so one huge benchmark can't quietly dress up the average. The **IMPACT** bar
+is each command's share of all tokens saved (sqrt-scaled), colored by its own
+efficiency. `⚠ low` flags commands worth un-prefixing (≥5 runs, <10% saved, or
+no output at all); `(n<5)` marks low rows still below the sample gate.
 
 Add `--json` to emit the same data as a single object (including the
 `auto_tuning` block) for tooling.
@@ -233,7 +243,7 @@ captures.
 
 ## Adaptive auto-tuning
 
-Enabled by default; disable with `--no-auto`. Five rules adjust `head`,
+Enabled by default; disable with `--no-auto`. Six rules adjust `head`,
 `tail`, and `tail_error` per `(cmd, args_hash)` bucket, where `args_hash` is
 an FNV-1a hash of the (redacted) args string — so `curl https://api.x.com`
 and `curl https://api.y.com` learn independently.
@@ -243,6 +253,7 @@ and `curl https://api.y.com` learn independently.
 | `expand_tail_err` | ≥1 consecutive recent failure with `lines_raw > 0` | Grows `tail_error` by `(1 + streak) ×`, capped by `--auto-ceiling` (default 1000). |
 | `decay_moderate` | 3-4 consecutive truncated successes | Shrinks `head` and `tail` by 20%, floored by `--auto-floor` (default 10). |
 | `decay_strong` | 5+ consecutive truncated successes | Shrinks `head` and `tail` by 40%, same floor. |
+| `recover_defaults` | 5 consecutive clean (success + not truncated) runs on a bucket tuned away from its base | The un-ratchet: restores `head`/`tail` to the configured base (unless the tune came from `proactive_shrink`, which a clean streak confirms) and an expanded `tail_error` back to base, in one firing. |
 | `proactive_shrink` | ≥20 records in the bucket, all clean (success + not truncated), `max(lines_raw) + 5` ≤ half the current head+tail budget | Sets `head = max(lines_raw) + 5`, `tail = default_tail / 4`. Max-based: never introduces a new truncation vs. observed history. |
 | `decay_steady` | ≥20 records in the bucket, all success, ≥80% truncated | Shrinks `head` and `tail` by 30%. Complements `decay_moderate/strong`: catches steady-state truncation when the streak is broken by occasional non-truncated runs. |
 
@@ -252,10 +263,12 @@ not the kind that extra error context would help with. The `noisy` counter
 in `--stats` tracks any past firings that did happen on such runs.
 
 Each firing is **persisted** to `$XDG_DATA_HOME/l0-cache/tuned.jsonl` keyed
-by `(cmd, args_hash)`. The next run of the same bucket starts from the saved
+by `(cmd, args_hash)` (compacted on write: one line per bucket, 30-day TTL).
+The next run of the same bucket starts from the saved
 `(head, tail, tail_error)` instead of the CLI defaults — so the decay rules
 compound: one bucket's `head` can shrink 30 → 24 → 19 → 11 → 10 (`--auto-floor`)
-over four firings. Best-effort I/O; a missing or corrupt `tuned.jsonl`
+over four firings, and `recover_defaults` walks it back to base once the
+workload changes. Best-effort I/O; a missing or corrupt `tuned.jsonl`
 degrades silently to the no-persistence behavior.
 
 ## Per-command configuration (optional)
@@ -446,7 +459,7 @@ Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
   "strategy": "head_tail",
   "exit_code": 0,
   "duration_ms": 1234,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "adaptive_event": "decay_moderate",
   "args_hash": "a1b2c3d4"
 }
@@ -457,15 +470,16 @@ Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
 records parse cleanly without them.
 
 The adaptive learner also reads/writes a small sidecar at
-`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per firing, keyed by
-`(cmd, args_hash)`. See [Adaptive auto-tuning](#adaptive-auto-tuning).
+`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per `(cmd, args_hash)`
+bucket, compacted on write. See [Adaptive auto-tuning](#adaptive-auto-tuning).
 
 Data directory resolution: `$XDG_DATA_HOME/l0-cache/` then `$HOME/.local/share/l0-cache/`
 then `/etc/passwd` lookup (for containers, cron, systemd).
 
 File permissions are set to 0600. `metrics.jsonl` auto-rotates at 10 MB
-(entries older than 30 days are pruned at rotation); `tuned.jsonl` grows
-one line per firing and is left to the user to inspect or delete.
+(entries older than 30 days are pruned at rotation); `tuned.jsonl` is
+compacted on write (one line per bucket, 30-day TTL). `--reset-stats`
+deletes both.
 
 ## Cross-Platform Support
 

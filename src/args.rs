@@ -153,52 +153,118 @@ impl Args {
         }
     }
 
-    /// Returns the command binary name (for metrics).
+    /// Returns the command binary name (for metrics). Leading `NAME=value`
+    /// environment assignments are skipped: `API_KEY=x deploy` must record
+    /// cmd "deploy" — recording the assignment leaked the secret VERBATIM
+    /// into `metrics.jsonl` and the `--stats` table (the redaction pipeline
+    /// only ran on the args field).
     pub fn cmd_name(&self) -> String {
         if let Some(real) = self.extract_real_cmd() {
             return real;
         }
         self.command
-            .first()
+            .iter()
+            .find(|t| !is_env_assignment(t))
             .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
             .unwrap_or_else(|| "(none)".to_string())
     }
 
-    /// Try to extract the real command from shell wrappers like sh -c "cmd"
+    /// Try to extract the real command from shell wrappers like sh -c "cmd".
     fn extract_real_cmd(&self) -> Option<String> {
+        self.extract_real_cmd_and_args().map(|(cmd, _)| cmd)
+    }
+
+    /// Extract the real (command, args) pair from shell wrappers like
+    /// `sh -c "cmd args…"`. Both fields come from the SAME layer: metrics
+    /// records used to mix them ({"cmd":"exit","args":"-c exit 42"} — inner
+    /// cmd, outer args), which also keyed the learner's args_hash buckets on
+    /// the wrong string.
+    fn extract_real_cmd_and_args(&self) -> Option<(String, String)> {
         let raw_bin = self.command.first()?;
         let bin = raw_bin.rsplit('/').next().unwrap_or(raw_bin);
         let shells = ["sh", "bash", "zsh", "ksh", "csh", "tcsh", "fish", "dash"];
-        if shells.contains(&bin) {
-            // Find the position of "-c"
-            if let Some(c_idx) = self.command.iter().position(|a| a == "-c") {
-                if let Some(cmd_str) = self.command.get(c_idx + 1) {
-                    let trimmed = cmd_str.trim_start();
-                    if !trimmed.is_empty() {
-                        // Find the first word before spaces or operators
-                        let first_word = trimmed
-                            .split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|')
-                            .next()?;
-                        let parsed = first_word.trim_matches(|c| c == '\'' || c == '"');
-                        let real_bin = parsed.rsplit('/').next().unwrap_or(parsed);
-                        if !real_bin.is_empty() {
-                            return Some(real_bin.to_string());
-                        }
-                    }
-                }
-            }
+        if !shells.contains(&bin) {
+            return None;
         }
-        None
+        // Find the position of "-c"
+        let c_idx = self.command.iter().position(|a| a == "-c")?;
+        let cmd_str = self.command.get(c_idx + 1)?;
+        let mut rest_str = cmd_str.trim_start();
+        if rest_str.is_empty() {
+            return None;
+        }
+        // Skip leading NAME=value assignments inside the script too
+        // (`sh -c 'PASSWORD=x deploy'` must not record cmd "PASSWORD=x");
+        // they are collected and re-join the args so secret redaction
+        // applies to them.
+        let mut assignments: Vec<String> = Vec::new();
+        loop {
+            let tok_end = rest_str.find(char::is_whitespace).unwrap_or(rest_str.len());
+            let tok = &rest_str[..tok_end];
+            if tok.is_empty() || !is_env_assignment(tok) || tok.contains([';', '&', '|']) {
+                break;
+            }
+            assignments.push(tok.to_string());
+            rest_str = rest_str[tok_end..].trim_start();
+        }
+        if rest_str.is_empty() {
+            return None;
+        }
+        // Find the first word before spaces or operators
+        let first_word = rest_str
+            .split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|')
+            .next()?;
+        let parsed = first_word.trim_matches(|c| c == '\'' || c == '"');
+        let real_bin = parsed.rsplit('/').next().unwrap_or(parsed);
+        if real_bin.is_empty() {
+            return None;
+        }
+        // The rest of the script string is the inner command's args; redact
+        // secrets token-wise (assignments included), same as the non-wrapped
+        // path.
+        let rest = rest_str[first_word.len()..].trim_start();
+        let mut tokens = assignments;
+        tokens.extend(rest.split_whitespace().map(String::from));
+        Some((real_bin.to_string(), redact_secret_args(&tokens)))
     }
 
     /// Returns the command arguments as a single string (for metrics), with
     /// obvious secrets redacted so they are not persisted to `metrics.jsonl`.
+    /// For `sh -c` wrappers this is the INNER command's args, matching what
+    /// `cmd_name()` reports as the command. Leading env assignments are part
+    /// of the args (not the cmd), so they pass through secret redaction.
     pub fn cmd_args_string(&self) -> String {
-        if self.command.len() > 1 {
-            redact_secret_args(&self.command[1..])
-        } else {
-            String::new()
+        if let Some((_, args)) = self.extract_real_cmd_and_args() {
+            return args;
         }
+        // Everything except the binary token (assignments + args after it).
+        let bin_idx = self.command.iter().position(|t| !is_env_assignment(t));
+        let tokens: Vec<String> = self
+            .command
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != bin_idx)
+            .map(|(_, t)| t.clone())
+            .collect();
+        if tokens.is_empty() {
+            String::new()
+        } else {
+            redact_secret_args(&tokens)
+        }
+    }
+}
+
+/// Whether a token is a shell `NAME=value` environment assignment that can
+/// prefix a command (`API_KEY=x deploy-tool`): a valid identifier before the
+/// first `=` (alphanumeric/underscore, not starting with a digit).
+fn is_env_assignment(tok: &str) -> bool {
+    match tok.find('=') {
+        Some(eq) if eq > 0 => {
+            let name = &tok[..eq];
+            !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
     }
 }
 
@@ -271,6 +337,73 @@ fn redact_secret_args(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sh -c records keep cmd and args on the SAME layer: inner command,
+    /// inner args (the old behavior mixed inner cmd with outer args).
+    #[test]
+    fn sh_c_inner_args_extracted() {
+        let args = Args::parse_from(["t", "sh", "-c", "cargo test --all"]);
+        assert_eq!(args.cmd_name(), "cargo");
+        assert_eq!(args.cmd_args_string(), "test --all");
+
+        let args = Args::parse_from(["t", "sh", "-c", "exit 42"]);
+        assert_eq!(args.cmd_name(), "exit");
+        assert_eq!(args.cmd_args_string(), "42");
+    }
+
+    /// Secret redaction applies to the INNER tokens of sh -c scripts.
+    #[test]
+    fn sh_c_inner_args_are_redacted() {
+        let args = Args::parse_from(["t", "sh", "-c", "curl --token abc123 https://x.test"]);
+        assert_eq!(args.cmd_name(), "curl");
+        assert_eq!(args.cmd_args_string(), "--token *** https://x.test");
+    }
+
+    /// Leading NAME=value assignments are NOT the command — recording them as
+    /// cmd leaked secrets verbatim into metrics.jsonl and the --stats table.
+    #[test]
+    fn env_assignment_prefix_not_recorded_as_cmd() {
+        let args = Args::parse_from(["t", "API_KEY=sk-direct789", "deploy-tool", "--go"]);
+        assert_eq!(args.cmd_name(), "deploy-tool");
+        let rendered = args.cmd_args_string();
+        assert!(
+            rendered.contains("API_KEY=***"),
+            "assignment must be redacted: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sk-direct789"),
+            "secret leaked: {rendered}"
+        );
+
+        // Same inside an sh -c script.
+        let args = Args::parse_from(["t", "sh", "-c", "PASSWORD=topsecret deploy-tool"]);
+        assert_eq!(args.cmd_name(), "deploy-tool");
+        let rendered = args.cmd_args_string();
+        assert!(
+            rendered.contains("PASSWORD=***"),
+            "inner assignment: {rendered}"
+        );
+        assert!(!rendered.contains("topsecret"), "secret leaked: {rendered}");
+
+        // Non-secret assignments survive un-redacted; pure-assignment command
+        // degrades to "(none)" rather than recording the assignment.
+        let args = Args::parse_from(["t", "FOO=bar", "env"]);
+        assert_eq!(args.cmd_name(), "env");
+        assert_eq!(args.cmd_args_string(), "FOO=bar");
+        let args = Args::parse_from(["t", "FOO=bar"]);
+        assert_eq!(args.cmd_name(), "(none)");
+    }
+
+    #[test]
+    fn is_env_assignment_shape() {
+        assert!(is_env_assignment("FOO=bar"));
+        assert!(is_env_assignment("API_KEY=x=y"));
+        assert!(!is_env_assignment("=bar"));
+        assert!(!is_env_assignment("1FOO=bar"));
+        assert!(!is_env_assignment("foo-bar=x"));
+        assert!(!is_env_assignment("plain"));
+        assert!(!is_env_assignment("--flag=value")); // dashes → not an identifier
+    }
 
     #[test]
     fn parse_basic_command() {

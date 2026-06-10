@@ -9,10 +9,32 @@
 
 use std::io::IsTerminal;
 
-// Inner content width of a boxed row (the cells between "│ " and " │").
+// Minimum inner content width of a boxed row (the cells between "│ " and " │").
+// The stats table's fixed columns are laid out against this width; wider
+// terminals grow the box (and the COMMAND column) up to INNER_MAX.
 pub const INNER: usize = 62;
-// Number of horizontal glyphs between two box corners.
-const RULE: usize = INNER + 2; // 64
+// Upper bound for the dynamic inner width — beyond this the table is all air.
+pub const INNER_MAX: usize = 100;
+
+/// Terminal column count via TIOCGWINSZ, when stdout is a real TTY.
+fn term_cols() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        if !std::io::stdout().is_terminal() {
+            return None;
+        }
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+        if rc == 0 && ws.ws_col > 0 {
+            return Some(ws.ws_col as usize);
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
 
 /// Whether ANSI color should be emitted on stdout.
 ///
@@ -32,23 +54,55 @@ pub fn color_enabled() -> bool {
     std::io::stdout().is_terminal()
 }
 
-/// Visible width of a plain (ANSI-free) string. Good enough for our content:
-/// box/block glyphs are all single-width, and command names are truncated by
-/// `char` count elsewhere, so a codepoint count matches columns on screen.
-fn vis_len(s: &str) -> usize {
-    s.chars().count()
+/// Approximate display width of a single char: 2 for the major East-Asian
+/// wide/fullwidth blocks, 0 for combining marks, else 1. Not a full UAX #11
+/// table (that would be a dependency) — covers the command-name characters
+/// that used to shatter the box alignment, since codepoint count != columns.
+pub fn char_cols(c: char) -> usize {
+    let u = c as u32;
+    match u {
+        // Combining diacritics.
+        0x0300..=0x036F => 0,
+        // Hangul Jamo, CJK radicals/symbols, Kana, CJK ideographs, Hangul
+        // syllables, fullwidth forms, wide punctuation.
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x2FFFD
+        | 0x30000..=0x3FFFD => 2,
+        _ => 1,
+    }
 }
 
-/// Carries the one-time color decision plus the palette.
+/// Visible width of a plain (ANSI-free) string, in terminal columns.
+pub fn vis_len(s: &str) -> usize {
+    s.chars().map(char_cols).sum()
+}
+
+/// Carries the one-time color decision, the palette, and the box width
+/// resolved from the terminal (INNER..=INNER_MAX columns of content).
 #[derive(Clone, Copy)]
 pub struct Ui {
     pub color: bool,
+    pub inner: usize,
 }
 
 impl Ui {
     pub fn new() -> Self {
+        let inner = term_cols()
+            .map(|cols| cols.saturating_sub(4).clamp(INNER, INNER_MAX))
+            .unwrap_or(INNER);
         Ui {
             color: color_enabled(),
+            inner,
         }
     }
 
@@ -83,11 +137,14 @@ impl Ui {
         self.paint("31", s)
     }
 
-    /// Color a percentage red → orange → green by magnitude.
+    /// Color a percentage red → orange → green by magnitude. The red tier IS
+    /// the low-savings hint threshold (shared constant): a red row and a
+    /// hint-worthy row used to disagree (red started at ≤40% while the ⚠
+    /// fired below 10%).
     pub fn pct_code(&self, pct: f64) -> &'static str {
         match pct {
             p if p > 80.0 => "38;5;46",
-            p if p > 40.0 => "38;5;214",
+            p if p >= crate::telemetry::LOW_VALUE_MAX_PCT => "38;5;214",
             _ => "38;5;196",
         }
     }
@@ -98,13 +155,18 @@ impl Ui {
         self.faint(s)
     }
 
+    /// Number of horizontal glyphs between two box corners.
+    fn rule(&self) -> usize {
+        self.inner + 2
+    }
+
     /// Top border with an embedded title (left) and optional right-side label,
     /// e.g. `┌─ l0-cache TELEMETRY ─────────────── last 7d ─┐`.
     pub fn box_top(&self, title: &str, right: &str) -> String {
         // Fixed (non-dash) glyphs on this line, by branch:
         //   empty right: "┌─ " + title + " " + "┐"                → 5 + title
         //   with  right: "┌─ " + title + "  " + right + " ─┐"     → 8 + title + right
-        let total = RULE + 2; // full visible width, corners included
+        let total = self.rule() + 2; // full visible width, corners included
         let fixed = if right.is_empty() {
             5 + vis_len(title)
         } else {
@@ -127,16 +189,16 @@ impl Ui {
     }
 
     pub fn box_div(&self) -> String {
-        self.border(&format!("├{}┤", "─".repeat(RULE)))
+        self.border(&format!("├{}┤", "─".repeat(self.rule())))
     }
 
     pub fn box_bottom(&self) -> String {
-        self.border(&format!("└{}┘", "─".repeat(RULE)))
+        self.border(&format!("└{}┘", "─".repeat(self.rule())))
     }
 
     /// Wrap a built [`Line`] in side borders, padding it to the inner width.
     pub fn box_row(&self, mut line: Line) -> String {
-        line.pad(INNER);
+        line.pad(self.inner);
         format!("{} {} {}", self.border("│"), line.done(), self.border("│"))
     }
 
@@ -245,12 +307,27 @@ impl Line {
 /// A proportional meter of `width` cells filled to `pct` (0–100), colored by
 /// magnitude. Returns `(rendered, width)` so it can be fed to [`Line::raw`].
 pub fn meter(ui: &Ui, pct: f64, width: usize) -> (String, usize) {
-    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    meter_scaled(ui, pct, pct, width)
+}
+
+/// A meter whose fill (`fill_pct`) and color (`color_pct`) are independent
+/// axes. The stats table fills the IMPACT bar by share-of-total-savings while
+/// keeping the color keyed to the row's efficiency — the bar used to re-render
+/// the same percentage the EFFIC. column already printed.
+pub fn meter_scaled(ui: &Ui, fill_pct: f64, color_pct: f64, width: usize) -> (String, usize) {
+    let filled = ((fill_pct.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    // A nonzero share always shows at least one cell — rounding small rows
+    // to an empty bar would read as "no savings at all".
+    let filled = if fill_pct > 0.0 {
+        filled.max(1)
+    } else {
+        filled
+    };
     let filled = filled.min(width);
     let empty = width - filled;
     let bar = format!(
         "{}{}",
-        ui.paint(ui.pct_code(pct), &"█".repeat(filled)),
+        ui.paint(ui.pct_code(color_pct), &"█".repeat(filled)),
         ui.faint(&"░".repeat(empty))
     );
     (bar, width)
@@ -261,7 +338,10 @@ mod tests {
     use super::*;
 
     fn mono() -> Ui {
-        Ui { color: false }
+        Ui {
+            color: false,
+            inner: INNER,
+        }
     }
 
     fn visible_cols(s: &str) -> usize {
@@ -271,7 +351,10 @@ mod tests {
 
     #[test]
     fn colored_row_aligns_to_box_width() {
-        let ui = Ui { color: true };
+        let ui = Ui {
+            color: true,
+            inner: INNER,
+        };
         let mut l = ui.line();
         l.paint("31", "abc").text("d");
         let row = ui.box_row(l);
@@ -313,5 +396,51 @@ mod tests {
         let (s, w) = meter(&ui, 150.0, 10);
         assert_eq!(w, 10);
         assert_eq!(s.chars().filter(|c| *c == '█').count(), 10);
+    }
+
+    #[test]
+    fn meter_scaled_separates_fill_from_color_and_floors_nonzero() {
+        let ui = mono();
+        // 3.9% share over 12 cells rounds to 0 — floored to 1 visible cell.
+        let (s, _) = meter_scaled(&ui, 3.9, 74.0, 12);
+        assert_eq!(s.chars().filter(|c| *c == '█').count(), 1);
+        // A true zero stays empty.
+        let (s, _) = meter_scaled(&ui, 0.0, 50.0, 12);
+        assert_eq!(s.chars().filter(|c| *c == '█').count(), 0);
+    }
+
+    /// Row color and the ⚠ low hint share one threshold (red < 10%); the
+    /// tiers were previously unpinned and the red tier silently drifted.
+    #[test]
+    fn pct_code_tiers_align_with_low_threshold() {
+        let ui = mono();
+        assert_eq!(ui.pct_code(9.9), "38;5;196", "below hint threshold = red");
+        assert_eq!(ui.pct_code(10.0), "38;5;214", "at threshold = orange");
+        assert_eq!(ui.pct_code(80.0), "38;5;214");
+        assert_eq!(ui.pct_code(80.1), "38;5;46", "green above 80");
+    }
+
+    #[test]
+    fn wide_chars_count_two_columns() {
+        assert_eq!(vis_len("abc"), 3);
+        assert_eq!(vis_len("日本語"), 6);
+        assert_eq!(vis_len("a日b"), 4);
+        // Combining marks are zero-width: "e" + COMBINING ACUTE = 1 column.
+        assert_eq!(vis_len("e\u{301}"), 1);
+        // A wide command name pads to the same visible width as an ASCII one.
+        let ui = mono();
+        let mut l = ui.line();
+        l.text("日本語");
+        let row = ui.box_row(l);
+        assert_eq!(visible_cols_wide(&row), INNER + 4);
+    }
+
+    /// Column count of a string using the same width model as vis_len.
+    fn visible_cols_wide(s: &str) -> usize {
+        let stripped = strip_ansi_escapes::strip(s.as_bytes());
+        String::from_utf8_lossy(&stripped)
+            .chars()
+            .map(char_cols)
+            .sum()
     }
 }

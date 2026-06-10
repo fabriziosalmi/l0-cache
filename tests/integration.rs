@@ -34,7 +34,9 @@ fn wait_timeout(mut child: Child, timeout: Duration) -> Result<ExitStatus, Strin
 #[test]
 fn binary_output_does_not_hang() {
     let t_bin = get_t_bin();
+    let xdg = temp_xdg("dd-hang");
     let child = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
         .args(["dd", "if=/dev/urandom", "bs=1M", "count=1"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -43,30 +45,37 @@ fn binary_output_does_not_hang() {
 
     // Wait with a 5 second timeout
     let _status = wait_timeout(child, Duration::from_secs(5)).expect("dd command hung!");
+    let _ = std::fs::remove_dir_all(&xdg);
 }
 
 #[test]
 fn exit_code_propagation() {
     let t_bin = get_t_bin();
+    let xdg = temp_xdg("exit-code");
     let child = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
         .args(["sh", "-c", "exit 42"])
         .spawn()
         .expect("failed to spawn l0-cache");
     let status = wait_timeout(child, Duration::from_secs(5)).unwrap();
     assert_eq!(status.code(), Some(42));
+    let _ = std::fs::remove_dir_all(&xdg);
 }
 
 #[test]
 fn pipe_to_head() {
     let t_bin = get_t_bin();
     let t_bin_str = t_bin.to_str().expect("valid path");
+    let xdg = temp_xdg("pipe-head");
     let child = Command::new("sh")
         .arg("-c")
         .arg(format!("'{}' seq 1 10000 | head -5", t_bin_str))
+        .env("XDG_DATA_HOME", &xdg)
         .spawn()
         .expect("failed to spawn shell");
     let status = wait_timeout(child, Duration::from_secs(5)).unwrap();
     assert!(status.success() || status.code() == Some(141));
+    let _ = std::fs::remove_dir_all(&xdg);
 }
 
 #[test]
@@ -124,12 +133,15 @@ fn integration_banner_does_not_appear_when_not_truncated() {
 #[test]
 fn integration_auto_flag_accepted() {
     let t_bin = get_t_bin();
+    let xdg = temp_xdg("auto-flag");
     let output = Command::new(&t_bin)
+        .env("XDG_DATA_HOME", &xdg)
         .args(["--auto", "echo", "hello"])
         .output()
         .expect("failed to execute l0-cache with --auto");
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout_str.trim(), "hello");
+    let _ = std::fs::remove_dir_all(&xdg);
 }
 
 #[test]
@@ -666,6 +678,10 @@ fn stats_json_is_machine_readable() {
     assert!(s.contains("\"total_runs\""));
     assert!(s.contains("\"usd_saved\""));
     assert!(s.contains("\"command\": \"cargo\""));
+    // Fields added with the dashboard refresh.
+    assert!(s.contains("\"median_run_efficiency_pct\""));
+    assert!(s.contains("\"recover_defaults\""));
+    assert!(s.contains("\"noisy_last_seen\""));
     let _ = std::fs::remove_dir_all(&xdg);
 }
 
@@ -1555,4 +1571,282 @@ fn auto_tuning_noisy_counter_only_marks_empty_failure_expansions() {
         "only the grep row is noisy"
     );
     let _ = std::fs::remove_dir_all(&xdg);
+}
+
+// ── Review-driven coverage: behaviors changed in the audit remediation ──────
+
+/// L0_CACHE_NO_TELEMETRY=1 must suppress every telemetry write; a falsy value
+/// must not.
+#[test]
+fn no_telemetry_env_suppresses_all_writes() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("no-telemetry");
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .env("L0_CACHE_NO_TELEMETRY", "1")
+        .args(["echo", "silent"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        !metrics.exists(),
+        "metric written despite L0_CACHE_NO_TELEMETRY=1"
+    );
+
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .env("L0_CACHE_NO_TELEMETRY", "0")
+        .args(["echo", "recorded"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(metrics.exists(), "falsy value must not disable telemetry");
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+/// An unknown leading flag is rejected (exit 2) BEFORE any metric is written —
+/// it used to run via `sh -c`, fail silently, and pollute the stats forever.
+#[test]
+fn unknown_leading_flag_rejected_without_metric() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("bogus-flag");
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--bogus-flag", "echo", "hi"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unrecognized option '--bogus-flag'"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !xdg.join("l0-cache").join("metrics.jsonl").exists(),
+        "no metric may be written for a rejected invocation"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+/// Invalid --since is an error in stats mode (it used to silently render
+/// all-time data under a header claiming the window); a valid one succeeds.
+#[test]
+fn invalid_since_is_an_error_in_stats_mode() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("since-invalid");
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .args(["--stats", "--since", "7days"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("invalid --since value '7days'"), "{stderr}");
+
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .args(["--stats", "--since", "7d"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "valid window must not error");
+
+    // Run mode: invalid value errors too; valid-but-ineffective warns.
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--since", "7D", "echo", "hi"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "invalid --since in run mode");
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--since", "7d", "echo", "hi"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--since has no effect"),
+        "expected ineffective-flag warning, got: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+/// --reset-stats deletes BOTH metrics.jsonl and tuned.jsonl (stale adaptive
+/// state used to survive and keep seeding runs).
+#[test]
+fn reset_stats_deletes_metrics_and_tuned() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("reset-both");
+    let dir = xdg.join("l0-cache");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("metrics.jsonl"), "{}\n").unwrap();
+    std::fs::write(dir.join("tuned.jsonl"), "{}\n").unwrap();
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .args(["--reset-stats"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        !dir.join("metrics.jsonl").exists(),
+        "metrics must be deleted"
+    );
+    assert!(
+        !dir.join("tuned.jsonl").exists(),
+        "tuned must be deleted too"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+/// End-to-end recovery through the REAL main.rs wiring (BaseParams captured
+/// pre-seed, seeded_by plumbed): decay a bucket on a 200-line workload, shrink
+/// the workload (same args bucket!), and watch recover_defaults restore base.
+#[test]
+fn recovery_restores_base_through_main_wiring() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("recovery-e2e");
+    let file = xdg.join("data.txt");
+    let write_lines = |n: usize| {
+        let body: String = (1..=n).map(|i| format!("{}\n", i)).collect();
+        std::fs::write(&file, body).unwrap();
+    };
+    let run = || {
+        Command::new(&t)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("L0_CACHE_GUARD", "0")
+            .args(["cat", file.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+
+    // 7 runs over 200 lines: truncated successes → decay persists a tune.
+    write_lines(200);
+    for _ in 0..7 {
+        assert!(run().status.success());
+    }
+    let tuned_path = xdg.join("l0-cache").join("tuned.jsonl");
+    let tuned = std::fs::read_to_string(&tuned_path).unwrap();
+    assert!(
+        tuned.contains("decay"),
+        "expected a decay tune, got: {tuned}"
+    );
+
+    // Workload shrinks below the threshold (same args → same bucket): after
+    // 5 clean runs the 6th fires recover_defaults and restores 30/30.
+    write_lines(80);
+    for _ in 0..6 {
+        assert!(run().status.success());
+    }
+    let tuned = std::fs::read_to_string(&tuned_path).unwrap();
+    assert!(
+        tuned.contains("recover_defaults"),
+        "recovery did not fire through main wiring: {tuned}"
+    );
+    assert!(
+        tuned.contains("\"head\":30") && tuned.contains("\"tail\":30"),
+        "base not restored: {tuned}"
+    );
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+/// The isolated tests write to THEIR xdg (pins both the metric write and the
+/// isolation — dropping the .env() would silently resume polluting the real
+/// metrics file with every cargo test run).
+#[test]
+fn isolated_run_writes_metric_into_its_own_xdg() {
+    let t = get_t_bin();
+    let xdg = temp_xdg("isolation-pin");
+    let out = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["sh", "-c", "exit 42"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(42));
+    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let content = std::fs::read_to_string(&metrics).expect("metric must land in the temp xdg");
+    assert!(content.contains("\"cmd\":\"exit\""));
+    assert!(content.contains("\"args\":\"42\""), "inner args: {content}");
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+/// The Claude-hook wrapper's skip-list: zero-output builtins are not wrapped,
+/// real commands are. Exercises the heredoc-generated wrapper extracted from
+/// claude-hook.sh (the front line against zero-output telemetry pollution).
+#[test]
+fn hook_wrapper_skips_builtins_and_wraps_commands() {
+    // jq is a hard dependency of the wrapper; skip the test where absent.
+    if Command::new("jq").arg("--version").output().is_err() {
+        eprintln!("skipping: jq not installed");
+        return;
+    }
+    let t = get_t_bin();
+    let hook_src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("claude-hook.sh"),
+    )
+    .unwrap();
+    let start = hook_src.find("<<'WRAP'").expect("WRAP heredoc start") + "<<'WRAP'".len();
+    let end = hook_src[start..]
+        .find("\nWRAP\n")
+        .map(|i| start + i)
+        .expect("WRAP heredoc end");
+    let wrapper_body = &hook_src[start..end];
+
+    let dir = temp_xdg("hook-wrapper");
+    let wrapper = dir.join("wrapper.sh");
+    std::fs::write(&wrapper, wrapper_body.trim_start()).unwrap();
+    // Toggle file + PATH with the freshly built binary visible as `l0-cache`.
+    let cfg = dir.join("config");
+    std::fs::create_dir_all(cfg.join("l0-cache")).unwrap();
+    std::fs::write(cfg.join("l0-cache").join("hook.enabled"), "").unwrap();
+    let bin_dir = dir.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::copy(&t, bin_dir.join("l0-cache")).unwrap();
+    let path_env = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let run_hook = |cmd: &str| -> String {
+        use std::io::Write as _;
+        let mut child = Command::new("bash")
+            .arg(&wrapper)
+            .env("XDG_CONFIG_HOME", &cfg)
+            .env("PATH", &path_env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = format!("{{\"tool_input\":{{\"command\":\"{}\"}}}}", cmd);
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    for skip in ["exit 42", "true", "wait", "trap - INT"] {
+        let out = run_hook(skip);
+        assert!(
+            out.trim().is_empty(),
+            "builtin '{skip}' must be skipped, got: {out}"
+        );
+    }
+    let out = run_hook("seq 1 100");
+    assert!(
+        out.contains("l0-cache --quiet --recover seq 1 100"),
+        "real command must be wrapped, got: {out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

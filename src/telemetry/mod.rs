@@ -23,6 +23,17 @@ use datetime::{parse_rfc3339_to_secs, parse_since, rfc3339_now};
 pub fn rfc3339_now_for_pub() -> String {
     rfc3339_now()
 }
+
+/// Whether a `--since` value parses to a valid window. Exposed so `main` can
+/// reject bad input up front: an unparseable value used to be silently
+/// ignored, rendering ALL-TIME data under a header that claimed the window
+/// (e.g. `--since 7days` → "last 7days" over all-time totals). A leading `+`
+/// is rejected too — `u64::parse` accepts it, but the raw string is echoed
+/// into the dashboard header ("last +3d").
+pub fn since_is_valid(s: &str) -> bool {
+    let s = s.trim();
+    !s.starts_with('+') && parse_since(s).is_some()
+}
 // Safety guard — re-exported so `main` can reach `telemetry::{...}`.
 pub use guard::{check_dangerous_command, guard_enabled};
 // Brought into scope so the in-module `#[cfg(test)] mod tests` (which uses
@@ -32,8 +43,17 @@ use datetime::to_rfc3339;
 #[cfg(test)]
 use guard::{is_critical_target, normalize_guard_path, parse_bool_env};
 
+/// Advisory file lock. On unix this is `flock(2)` on a sidecar lock file:
+/// kernel-released on process death (no staleness heuristic needed, unlike
+/// the old mkdir-based lock whose 10s mtime-break could steal a live lock and
+/// whose rotation window could drop a concurrent append). Non-unix keeps the
+/// mkdir fallback. Locking stays best-effort at the call sites: telemetry
+/// must never block or fail the wrapped command.
 struct FileLock {
     path: PathBuf,
+    #[cfg(unix)]
+    file: Option<fs::File>,
+    #[cfg(not(unix))]
     acquired: bool,
 }
 
@@ -41,10 +61,65 @@ impl FileLock {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
+            #[cfg(unix)]
+            file: None,
+            #[cfg(not(unix))]
             acquired: false,
         }
     }
 
+    /// Lock handle guarding `data_file`. The lock path is protocol-specific:
+    /// flock uses `<file>.flock` (a regular file), deliberately DISTINCT from
+    /// the legacy mkdir protocol's `<file>.lock` directory — so during a
+    /// mixed-version window (agent shells still running a pre-flock binary
+    /// across an upgrade) the old binary's mkdir lock keeps working at its
+    /// own path instead of stalling 10×50ms per run on a path whose
+    /// filesystem type changed under it.
+    fn for_data_file(data_file: &std::path::Path) -> Self {
+        #[cfg(unix)]
+        let lock_path = data_file.with_extension("jsonl.flock");
+        #[cfg(not(unix))]
+        let lock_path = data_file.with_extension("jsonl.lock");
+        FileLock::new(lock_path)
+    }
+
+    #[cfg(unix)]
+    fn lock(&mut self) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let file = match OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        for _ in 0..10 {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                self.file = Some(file);
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// Whether this handle currently holds the lock (test observability).
+    #[cfg(test)]
+    fn acquired(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.file.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            self.acquired
+        }
+    }
+
+    #[cfg(not(unix))]
     fn lock(&mut self) -> bool {
         for _ in 0..10 {
             match fs::create_dir(&self.path) {
@@ -73,6 +148,14 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // Closing the fd releases the flock; the lock file itself stays
+            // (unlinking it would open a two-owners race with a third process
+            // creating a fresh file at the same path).
+            self.file.take();
+        }
+        #[cfg(not(unix))]
         if self.acquired {
             let _ = fs::remove_dir(&self.path);
         }
@@ -197,12 +280,42 @@ pub struct TunedParams {
 /// Scan the tuned-params sidecar for the most recent entry matching this
 /// bucket. Fail-open: any I/O error or missing file → `None`.
 ///
-/// Implementation is intentionally simple — scan-and-keep-last — because the
-/// sidecar holds at most one line per active bucket, so even a heavy user's
-/// file stays in the low kilobytes.
+/// Implementation is intentionally simple — scan-and-keep-last. `save_tuned`
+/// compacts on write (latest entry per bucket), so the file holds one line
+/// per active bucket and stays in the low kilobytes even for a heavy user.
+/// Keep-last still matters for files written by pre-compaction versions.
 pub fn lookup_tuned(cmd: &str, args_hash: &str) -> Option<TunedParams> {
     let path = tuned_path()?;
     lookup_tuned_at_path(&path, cmd, args_hash)
+}
+
+/// How long a persisted tune stays authoritative. Matches the metrics file's
+/// 30-day housekeeping window: a tune older than every record that could
+/// justify it should not keep seeding runs forever (the one-way-ratchet bug).
+const TUNED_TTL_SECS: u64 = 30 * 86400;
+
+/// Tolerance for timestamps slightly in the future (clock skew, NTP steps).
+/// Anything further ahead is treated as expired — `saturating_sub` alone made
+/// a far-future timestamp (e.g. a corrupted "2099-…" entry) fresh forever,
+/// the exact immortal-tune failure mode the TTL exists to eliminate.
+const TUNED_FUTURE_SKEW_SECS: u64 = 86400;
+
+/// Whether a tuned entry is still within its TTL. An unparseable timestamp
+/// (e.g. garbage from an external writer) counts as expired.
+fn tuned_entry_fresh(t: &TunedParams, now_secs: u64) -> bool {
+    match parse_rfc3339_to_secs(&t.ts) {
+        Some(ts) => {
+            ts <= now_secs + TUNED_FUTURE_SKEW_SECS && now_secs.saturating_sub(ts) <= TUNED_TTL_SECS
+        }
+        None => false,
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Path-explicit variant used by tests so they don't have to mutate the
@@ -212,13 +325,17 @@ fn lookup_tuned_at_path(path: &std::path::Path, cmd: &str, args_hash: &str) -> O
         return None;
     }
     let content = fs::read_to_string(path).ok()?;
+    // TTL during the scan (matching compaction's semantics): an expired tune
+    // no longer seeds runs, and a stale/garbage-ts LATER line must not hide a
+    // fresh earlier entry by winning keep-last and then failing the filter.
+    let now = now_unix_secs();
     let mut found: Option<TunedParams> = None;
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(t) = serde_json::from_str::<TunedParams>(line) {
-            if t.cmd == cmd && t.args_hash == args_hash {
+            if t.cmd == cmd && t.args_hash == args_hash && tuned_entry_fresh(&t, now) {
                 found = Some(t);
             }
         }
@@ -226,10 +343,14 @@ fn lookup_tuned_at_path(path: &std::path::Path, cmd: &str, args_hash: &str) -> O
     found
 }
 
-/// Append a tuned-params line for the bucket. Best-effort: any error → a
-/// single stderr warning (silenced by `--quiet`), never a panic, never an
-/// effect on the wrapped command's exit code.
+/// Upsert the bucket's tune; the file is compacted and atomically rewritten
+/// on each write (append-only fallback when degraded). Best-effort: any
+/// error → a single stderr warning (silenced by `--quiet`), never a panic,
+/// never an effect on the wrapped command's exit code.
 pub fn save_tuned(t: &TunedParams, quiet: bool) {
+    if telemetry_disabled() {
+        return;
+    }
     let path = match tuned_path() {
         Some(p) => p,
         None => return,
@@ -238,6 +359,11 @@ pub fn save_tuned(t: &TunedParams, quiet: bool) {
 }
 
 /// Path-explicit variant — see `lookup_tuned_at_path` for rationale.
+///
+/// Compacts on write: the existing file is reduced to its latest entry per
+/// (cmd, args_hash) bucket, this entry is upserted, and the whole file is
+/// rewritten via temp-file + rename. The file used to be append-only (one
+/// line per FIRING, unbounded growth, contradicting its own docs).
 fn save_tuned_at_path(path: &std::path::Path, t: &TunedParams, quiet: bool) {
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
@@ -251,9 +377,77 @@ fn save_tuned_at_path(path: &std::path::Path, t: &TunedParams, quiet: bool) {
             return;
         }
     }
-    let lock_path = path.with_extension("jsonl.lock");
-    let mut lock = FileLock::new(lock_path);
-    let _ = lock.lock();
+    let mut lock = FileLock::for_data_file(path);
+    let locked = lock.lock();
+
+    // The compacting rewrite is a read-modify-replace of the WHOLE file, so
+    // it is only safe while holding the lock and only correct from a snapshot
+    // we could actually read. In every degraded case, fall back to a plain
+    // O_APPEND of this one entry: the keep-last reader semantics tolerate
+    // multiple lines per bucket, so an append can duplicate but never lose
+    // another writer's tune (the rewrite from a bad snapshot could).
+    let read_result = fs::read_to_string(path);
+    let degraded =
+        !locked || matches!(&read_result, Err(e) if e.kind() != std::io::ErrorKind::NotFound);
+    if degraded {
+        append_tuned_line(path, t, quiet);
+        return;
+    }
+
+    // Latest entry per bucket, in first-seen order; then upsert ours.
+    // Entries past their TTL are pruned here — they no longer seed runs
+    // (lookup filters them) so carrying them forward is dead weight.
+    let now_secs = now_unix_secs();
+    let mut entries: Vec<TunedParams> = Vec::new();
+    if let Ok(content) = &read_result {
+        for line in content.lines() {
+            if let Ok(parsed) = serde_json::from_str::<TunedParams>(line) {
+                if !tuned_entry_fresh(&parsed, now_secs) {
+                    continue;
+                }
+                match entries
+                    .iter_mut()
+                    .find(|e| e.cmd == parsed.cmd && e.args_hash == parsed.args_hash)
+                {
+                    Some(slot) => *slot = parsed,
+                    None => entries.push(parsed),
+                }
+            }
+        }
+    }
+    match entries
+        .iter_mut()
+        .find(|e| e.cmd == t.cmd && e.args_hash == t.args_hash)
+    {
+        Some(slot) => *slot = t.clone(),
+        None => entries.push(t.clone()),
+    }
+
+    let mut out = String::new();
+    for e in &entries {
+        if let Ok(json) = serde_json::to_string(e) {
+            out.push_str(&json);
+            out.push('\n');
+        }
+    }
+    // Unique tmp name: a shared name would let two writers that BOTH lost the
+    // lock race publish each other's half-written file via rename.
+    let tmp = path.with_extension(format!(
+        "jsonl.tmp.{}.{}",
+        std::process::id(),
+        now_unix_secs()
+    ));
+    let write_result = fs::write(&tmp, out).and_then(|_| fs::rename(&tmp, path));
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp);
+        if !quiet {
+            eprintln!("l0-cache: warning: cannot write {}: {}", path.display(), e);
+        }
+    }
+}
+
+/// Degraded-path writer: append one tuned line without rewriting the file.
+fn append_tuned_line(path: &std::path::Path, t: &TunedParams, quiet: bool) {
     let json = match serde_json::to_string(t) {
         Ok(s) => s,
         Err(_) => return,
@@ -270,12 +464,20 @@ fn save_tuned_at_path(path: &std::path::Path, t: &TunedParams, quiet: bool) {
     }
 }
 
-/// Delete all recorded telemetry statistics.
+/// Delete all recorded telemetry statistics, including the adaptive-tuning
+/// sidecar — leaving `tuned.jsonl` behind meant stale adaptive state kept
+/// seeding runs while `--stats` reported "No metrics found".
+///
+/// Lock artifacts (the flock files and any legacy mkdir lock directory) are
+/// removed best-effort: reset is an explicit, rare user action, and a writer
+/// racing it simply recreates its lock on the next run.
 pub fn reset_stats() -> std::io::Result<()> {
-    if let Some(path) = metrics_path() {
+    for path in [metrics_path(), tuned_path()].into_iter().flatten() {
         if path.exists() {
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(&path)?;
         }
+        let _ = std::fs::remove_file(path.with_extension("jsonl.flock"));
+        let _ = std::fs::remove_dir(path.with_extension("jsonl.lock"));
     }
     Ok(())
 }
@@ -348,8 +550,22 @@ fn home_from_passwd() -> Option<String> {
 /// Maximum metrics file size before rotation (10MB).
 const METRICS_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Whether telemetry writes are disabled via `L0_CACHE_NO_TELEMETRY` (truthy
+/// values per `parse_bool_env`: 1/true/yes/on). Used by test harnesses and
+/// benchmark scripts so they never pollute the user's real metrics/tuning
+/// files, regardless of `XDG_DATA_HOME` isolation.
+fn telemetry_disabled() -> bool {
+    std::env::var("L0_CACHE_NO_TELEMETRY")
+        .ok()
+        .and_then(|v| guard::parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
 /// Append a metric to the JSONL file. Fail-safe: errors → stderr warning, never panics.
 pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
+    if telemetry_disabled() {
+        return;
+    }
     let path = match metrics_path() {
         Some(p) => p,
         None => {
@@ -377,8 +593,7 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
     }
 
     // Acquire lock for write and rotation
-    let lock_path = path.with_extension("jsonl.lock");
-    let mut lock = FileLock::new(lock_path);
+    let mut lock = FileLock::for_data_file(&path);
     let _ = lock.lock(); // best-effort locking
 
     // Auto-rotate if file is too large
@@ -517,12 +732,23 @@ struct CmdStats {
     auto_proactive_shrink: usize,
     /// Times the `decay_steady` (Step 4) rule fired for this command.
     auto_decay_steady: usize,
+    /// Times the `recover_defaults` (un-ratchet) rule fired for this command.
+    auto_recover: usize,
     /// Subset of `auto_expand` where the trigger was semantically empty:
     /// failing exit + zero output lines (classic grep/find "no match"). The
     /// expansion did nothing useful — this counter exposes the false-positive
     /// rate the future Step 1 fix is meant to drive to zero.
     auto_noisy: usize,
 }
+
+/// Minimum runs before a command can be flagged low-value — below this the
+/// sample is too small to advise on. Shared by the `⚠ low` row marker, the
+/// stats footer, and `--discover` so the three surfaces can never disagree.
+const LOW_VALUE_MIN_RUNS: usize = 5;
+/// Savings percentage below which wrapping is considered not worth it.
+/// `pub(crate)`: `ui::pct_code` keys its red tier on this same value, so the
+/// row color and the `⚠ low` hint can never drift apart again.
+pub(crate) const LOW_VALUE_MAX_PCT: f64 = 10.0;
 
 impl CmdStats {
     fn auto_firings(&self) -> usize {
@@ -531,6 +757,28 @@ impl CmdStats {
             + self.auto_decay_strong
             + self.auto_proactive_shrink
             + self.auto_decay_steady
+            + self.auto_recover
+    }
+
+    /// Enough runs, real output, but savings under 10% — the prefix is
+    /// mostly overhead on this command.
+    fn is_low_savings(&self) -> bool {
+        self.runs >= LOW_VALUE_MIN_RUNS
+            && self.tokens_raw_total > 0
+            && pct(self.tokens_saved_total, self.tokens_raw_total) < LOW_VALUE_MAX_PCT
+    }
+
+    /// Enough runs and never any output — wrapping can't save anything by
+    /// definition (shell builtins like `exit`, zero-output commands). These
+    /// used to escape every hint because the low-savings predicate required
+    /// `tokens_raw_total > 0`.
+    fn is_zero_output(&self) -> bool {
+        self.runs >= LOW_VALUE_MIN_RUNS && self.tokens_raw_total == 0
+    }
+
+    /// Single source of truth for "stop prefixing this command" advice.
+    fn is_low_value(&self) -> bool {
+        self.is_low_savings() || self.is_zero_output()
     }
 }
 
@@ -540,6 +788,10 @@ struct StatsAgg {
     total_runs: usize,
     total_saved: usize,
     total_raw: usize,
+    /// Unweighted median of per-run efficiencies (runs with output only).
+    /// Complements the token-weighted headline, which a single huge command
+    /// can dominate (one dd benchmark made 77%-real-world read as 98%).
+    median_run_pct: f64,
     by_cmd: Vec<(String, CmdStats)>,
     /// Sum across all commands of each rule's firings.
     auto_expand_total: usize,
@@ -547,7 +799,12 @@ struct StatsAgg {
     auto_decay_strong_total: usize,
     auto_proactive_shrink_total: usize,
     auto_decay_steady_total: usize,
+    auto_recover_total: usize,
     auto_noisy_total: usize,
+    /// Timestamp of the most recent noisy firing in the window. Rendered next
+    /// to the noisy counter so stale pre-fix history (the noisy-skip landed in
+    /// 0.1.10) is distinguishable from a live problem in the all-time view.
+    auto_noisy_last_ts: Option<String>,
 }
 
 impl StatsAgg {
@@ -557,6 +814,7 @@ impl StatsAgg {
             + self.auto_decay_strong_total
             + self.auto_proactive_shrink_total
             + self.auto_decay_steady_total
+            + self.auto_recover_total
     }
 }
 
@@ -594,11 +852,32 @@ fn cost_shown(cost_per_mtok: f64) -> bool {
 /// to `width` columns (char-boundary safe).
 fn safe_label(cmd: &str, width: usize) -> String {
     let clean: String = cmd.chars().filter(|c| !c.is_control()).collect();
-    if clean.chars().count() > width {
-        format!("{}…", clean.chars().take(width - 1).collect::<String>())
-    } else {
-        clean
+    if crate::ui::vis_len(&clean) <= width {
+        return clean;
     }
+    // Truncate by display COLUMNS, not chars: a CJK char occupies two cells,
+    // so a char-count clamp let wide names overflow the column and shatter
+    // the box alignment. saturating: width 0 must not underflow.
+    let budget = width.saturating_sub(1);
+    let mut used = 0;
+    let mut out = String::new();
+    for c in clean.chars() {
+        let w = crate::ui::char_cols(c);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// Pad `s` with spaces to `width` display columns. `format!("{:<w$}")` pads
+/// by char count, which under-pads names containing double-width chars.
+fn pad_cols(s: &str, width: usize) -> String {
+    let used = crate::ui::vis_len(s);
+    format!("{}{}", s, " ".repeat(width.saturating_sub(used)))
 }
 
 /// Read, parse, and aggregate the metrics file for the `since` window. Shared by
@@ -612,8 +891,7 @@ fn aggregate_metrics(since: Option<&str>) -> StatsData {
         return StatsData::NoFile(path);
     }
 
-    let lock_path = path.with_extension("jsonl.lock");
-    let mut lock = FileLock::new(lock_path);
+    let mut lock = FileLock::for_data_file(&path);
     let _ = lock.lock(); // best-effort locking
 
     let content = match fs::read_to_string(&path) {
@@ -624,12 +902,21 @@ fn aggregate_metrics(since: Option<&str>) -> StatsData {
         }
     };
 
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let cutoff = since.and_then(|s| parse_since(s).map(|secs| now_secs.saturating_sub(secs)));
+    let cutoff =
+        since.and_then(|s| parse_since(s).map(|secs| now_unix_secs().saturating_sub(secs)));
 
+    match aggregate_content(&content, cutoff) {
+        None => StatsData::Empty,
+        Some(mut agg) => {
+            agg.path = path;
+            StatsData::Ready(agg)
+        }
+    }
+}
+
+/// Pure aggregation over JSONL content — separated from the I/O so the
+/// renderer can be unit-tested against fixture records.
+fn aggregate_content(content: &str, cutoff: Option<u64>) -> Option<StatsAgg> {
     let mut total_runs: usize = 0;
     let mut total_saved: usize = 0;
     let mut total_raw: usize = 0;
@@ -638,8 +925,13 @@ fn aggregate_metrics(since: Option<&str>) -> StatsData {
     let mut auto_decay_strong_total: usize = 0;
     let mut auto_proactive_shrink_total: usize = 0;
     let mut auto_decay_steady_total: usize = 0;
+    let mut auto_recover_total: usize = 0;
     let mut auto_noisy_total: usize = 0;
+    let mut auto_noisy_last_ts: Option<String> = None;
     let mut by_cmd: std::collections::HashMap<String, CmdStats> = std::collections::HashMap::new();
+    // Per-run efficiencies (runs with output only) for the unweighted median —
+    // the token-weighted headline alone lets one huge command bury the rest.
+    let mut run_pcts: Vec<f64> = Vec::new();
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -659,13 +951,22 @@ fn aggregate_metrics(since: Option<&str>) -> StatsData {
             }
         }
 
+        // Clamp at ingestion: the metrics file is externally writable, and a
+        // tampered/corrupt record with saved > raw would otherwise leak >100%
+        // into the median, the JSON, and the totals while fmt_pct clamps the
+        // text view — three surfaces disagreeing on the same input.
+        let saved = metric.tokens_saved.min(metric.tokens_raw);
+
         total_runs += 1;
-        total_saved += metric.tokens_saved;
+        total_saved += saved;
         total_raw += metric.tokens_raw;
+        if metric.tokens_raw > 0 {
+            run_pcts.push(pct(saved, metric.tokens_raw));
+        }
 
         let entry = by_cmd.entry(metric.cmd.clone()).or_default();
         entry.runs += 1;
-        entry.tokens_saved_total += metric.tokens_saved;
+        entry.tokens_saved_total += saved;
         entry.tokens_raw_total += metric.tokens_raw;
 
         // Auto-tuning event classification. Unknown tags are ignored (forward-
@@ -682,6 +983,10 @@ fn aggregate_metrics(since: Option<&str>) -> StatsData {
                     if metric.exit_code != 0 && metric.lines_raw == 0 {
                         entry.auto_noisy += 1;
                         auto_noisy_total += 1;
+                        // RFC3339 strings order lexicographically.
+                        if auto_noisy_last_ts.as_deref() < Some(metric.ts.as_str()) {
+                            auto_noisy_last_ts = Some(metric.ts.clone());
+                        }
                     }
                 }
                 ADAPTIVE_EVENT_DECAY_MODERATE => {
@@ -700,30 +1005,54 @@ fn aggregate_metrics(since: Option<&str>) -> StatsData {
                     entry.auto_decay_steady += 1;
                     auto_decay_steady_total += 1;
                 }
+                ADAPTIVE_EVENT_RECOVER => {
+                    entry.auto_recover += 1;
+                    auto_recover_total += 1;
+                }
                 _ => {}
             }
         }
     }
 
     if total_runs == 0 {
-        return StatsData::Empty;
+        return None;
     }
 
-    let mut by_cmd: Vec<(String, CmdStats)> = by_cmd.into_iter().collect();
-    by_cmd.sort_by_key(|(_, s)| std::cmp::Reverse(s.tokens_saved_total));
+    let median_run_pct = {
+        run_pcts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        match run_pcts.len() {
+            0 => 0.0,
+            n if n % 2 == 1 => run_pcts[n / 2],
+            n => (run_pcts[n / 2 - 1] + run_pcts[n / 2]) / 2.0,
+        }
+    };
 
-    StatsData::Ready(StatsAgg {
-        path,
+    let mut by_cmd: Vec<(String, CmdStats)> = by_cmd.into_iter().collect();
+    // Tie-breakers (runs desc, then name) make the order deterministic: the
+    // source is a HashMap, so ties — e.g. several 0-saved commands — used to
+    // shuffle on every invocation.
+    by_cmd.sort_by(|(name_a, a), (name_b, b)| {
+        b.tokens_saved_total
+            .cmp(&a.tokens_saved_total)
+            .then(b.runs.cmp(&a.runs))
+            .then(name_a.cmp(name_b))
+    });
+
+    Some(StatsAgg {
+        path: PathBuf::new(), // set by aggregate_metrics
         total_runs,
         total_saved,
         total_raw,
+        median_run_pct,
         by_cmd,
         auto_expand_total,
         auto_decay_mod_total,
         auto_decay_strong_total,
         auto_proactive_shrink_total,
         auto_decay_steady_total,
+        auto_recover_total,
         auto_noisy_total,
+        auto_noisy_last_ts,
     })
 }
 
@@ -753,26 +1082,56 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
         return;
     }
 
+    let ui = crate::ui::Ui::new();
+    print!("{}", render_stats_text(&agg, &ui, since, cost_per_mtok));
+}
+
+/// Format an efficiency percentage. "100.0%" is reserved for a true
+/// saved == raw; anything else ≥99.95% floors to 99.9% — `{:.1}` rounding
+/// used to fabricate a perfect score for 99.97%-efficient commands.
+fn fmt_pct(saved: usize, raw: usize) -> String {
+    let p = pct(saved, raw).min(100.0);
+    // `!=` and not `<`: tampered records with saved > raw clamp to p == 100.0
+    // and would otherwise print the very "100.0%" this guard reserves.
+    if saved != raw && p > 99.9 {
+        "99.9%".to_string()
+    } else {
+        format!("{:.1}%", p)
+    }
+}
+
+/// Build the full text dashboard. Pure with respect to its inputs so the
+/// rendering — markers, thresholds, number formats, footers — is unit-testable
+/// (it used to println! straight to stdout, shipping every regression silently).
+fn render_stats_text(
+    agg: &StatsAgg,
+    ui: &crate::ui::Ui,
+    since: Option<&str>,
+    cost_per_mtok: f64,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
     let total_runs = agg.total_runs;
     let total_tokens_saved = agg.total_saved;
     let total_tokens_raw = agg.total_raw;
-    let path = &agg.path;
     let avg_pct = pct(total_tokens_saved, total_tokens_raw);
+    // The COMMAND column absorbs extra terminal width (10..=24 columns).
+    let name_w = 10 + (ui.inner - crate::ui::INNER).min(14);
 
-    let ui = crate::ui::Ui::new();
     let period = match since {
         Some(s) => format!("last {}", s),
         None => "all-time".to_string(),
     };
 
     // ── Summary card ─────────────────────────────────────────────────────
-    println!("{}", ui.box_top("l0-cache TELEMETRY", &period));
+    let _ = writeln!(out, "{}", ui.box_top("l0-cache TELEMETRY", &period));
 
     let mut row = ui.line();
     row.paint("38;5;245", "Runs")
         .pad(12)
         .paint("1", &format_number(total_runs));
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     let mut row = ui.line();
     row.paint("38;5;245", "Saved")
@@ -780,21 +1139,53 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
         .paint(ui.pct_code(avg_pct), &format_tokens(total_tokens_saved))
         .paint(
             "38;5;238",
-            &format!("  of {} raw", format_tokens(total_tokens_raw)),
+            &format!("  of {} raw · est. tokens", format_tokens(total_tokens_raw)),
         );
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
-    let (gauge, gw) = crate::ui::meter(&ui, avg_pct, 24);
+    let (gauge, gw) = crate::ui::meter(ui, avg_pct, 24);
     let mut row = ui.line();
     row.paint("38;5;245", "Efficiency")
         .pad(12)
         .paint(
             ui.pct_code(avg_pct),
-            &format!("{:>6}", format!("{:.1}%", avg_pct.min(100.0))),
+            &format!("{:>6}", fmt_pct(total_tokens_saved, total_tokens_raw)),
         )
         .text("  ")
         .raw(&gauge, gw);
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
+
+    // Unweighted median per-run efficiency: the honest companion to the
+    // token-weighted gauge above, which one huge command can dominate.
+    let mut row = ui.line();
+    row.paint("38;5;245", "Median/run")
+        .pad(12)
+        .paint(
+            ui.pct_code(agg.median_run_pct),
+            &format!("{:>6}", format!("{:.1}%", agg.median_run_pct)),
+        )
+        .paint("38;5;238", "  unweighted");
+    let _ = writeln!(out, "{}", ui.box_row(row));
+
+    // Dominance disclosure: when one command holds >50% of all savings, the
+    // headline gauge is mostly that command's story — say so.
+    if let Some((top_cmd, top_stats)) = agg.by_cmd.first() {
+        if total_tokens_saved > 0 {
+            let share = 100.0 * top_stats.tokens_saved_total as f64 / total_tokens_saved as f64;
+            if share > 50.0 {
+                let mut row = ui.line();
+                row.pad(12).paint(
+                    "38;5;238",
+                    &format!(
+                        "{} accounts for {:.0}% of savings",
+                        safe_label(top_cmd, name_w),
+                        share
+                    ),
+                );
+                let _ = writeln!(out, "{}", ui.box_row(row));
+            }
+        }
+    }
 
     if cost_shown(cost_per_mtok) {
         let mut row = ui.line();
@@ -805,16 +1196,16 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
                 &format!("${:.2}", usd(total_tokens_saved, cost_per_mtok)),
             )
             .paint("38;5;238", &format!("  @ ${:.2}/Mtok", cost_per_mtok));
-        println!("{}", ui.box_row(row));
+        let _ = writeln!(out, "{}", ui.box_row(row));
     }
 
-    println!("{}", ui.box_div());
+    let _ = writeln!(out, "{}", ui.box_div());
 
     // ── Per-command table ────────────────────────────────────────────────
     let sorted = &agg.by_cmd; // already sorted by tokens saved (desc)
 
     let mut hdr = ui.line();
-    hdr.paint("38;5;245", &format!("{:<10}", "COMMAND"))
+    hdr.paint("38;5;245", &pad_cols("COMMAND", name_w))
         .text(" ")
         .paint("38;5;245", &format!("{:>5}", "RUNS"))
         .text("  ")
@@ -823,24 +1214,30 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
         .paint("38;5;245", &format!("{:>6}", "EFFIC."))
         .text(" ")
         .paint("38;5;245", "IMPACT");
-    println!("{}", ui.box_row(hdr));
+    let _ = writeln!(out, "{}", ui.box_row(hdr));
 
     for (i, (cmd, stats)) in sorted.iter().enumerate() {
-        let pct = if stats.tokens_raw_total > 0 {
-            (stats.tokens_saved_total as f64 / stats.tokens_raw_total as f64) * 100.0
+        let eff_pct = pct(stats.tokens_saved_total, stats.tokens_raw_total);
+
+        // Sanitize + clamp to the name column (the metrics file is externally
+        // writable: drop control chars and stay char-boundary safe).
+        let cmd_disp = safe_label(cmd, name_w);
+
+        // IMPACT = this command's share of all savings (sqrt-scaled so small
+        // rows stay visible), colored by efficiency. The bar used to re-plot
+        // the same number as the EFFIC. column, hiding skew like one command
+        // holding 90% of savings behind a full-looking bar for everyone.
+        let share = if agg.total_saved > 0 {
+            stats.tokens_saved_total as f64 / agg.total_saved as f64
         } else {
             0.0
         };
-
-        // Sanitize + clamp to the 10-wide name column (the metrics file is
-        // externally writable: drop control chars and stay char-boundary safe).
-        let cmd_disp = safe_label(cmd, 10);
-
-        let (bar, bw) = crate::ui::meter(&ui, pct, 12);
-        let low = stats.runs >= 5 && stats.tokens_raw_total > 0 && pct < 10.0;
+        let fill = 100.0 * share.sqrt();
+        let (bar, bw) = crate::ui::meter_scaled(ui, fill, eff_pct, 12);
+        let low = stats.is_low_value();
 
         let mut row = ui.line();
-        row.paint("38;5;252", &format!("{:<10}", cmd_disp))
+        row.paint("38;5;252", &pad_cols(&cmd_disp, name_w))
             .text(" ")
             .paint("38;5;245", &format!("{:>5}", format_number(stats.runs)))
             .text("  ")
@@ -850,62 +1247,85 @@ pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
             )
             .text("  ")
             .paint(
-                ui.pct_code(pct),
-                &format!("{:>6}", format!("{:.1}%", pct.min(100.0))),
+                ui.pct_code(eff_pct),
+                &format!(
+                    "{:>6}",
+                    fmt_pct(stats.tokens_saved_total, stats.tokens_raw_total)
+                ),
             )
             .text(" ")
             .raw(&bar, bw)
             .text("  ");
-        if i == 0 && stats.tokens_saved_total > 0 {
-            row.paint("32", "↑ best");
-        } else if low {
+        // Markers: the actionable warning wins over the celebratory one (the
+        // old order suppressed a possible ⚠ on row 0); rows that are red but
+        // below the sample-size gate say why they carry no ⚠.
+        if low {
             row.paint("33", "⚠ low");
+        } else if i == 0 && stats.tokens_saved_total > 0 {
+            row.paint("32", "↑ most saved");
+        } else if eff_pct < LOW_VALUE_MAX_PCT && stats.runs < LOW_VALUE_MIN_RUNS {
+            row.paint("38;5;238", "(n<5)");
         }
-        println!("{}", ui.box_row(row));
+        let _ = writeln!(out, "{}", ui.box_row(row));
     }
 
     // ── Auto-tuning section ──────────────────────────────────────────────
-    render_auto_tuning_section(&ui, &agg);
+    render_auto_tuning_section(&mut out, ui, agg, name_w);
 
-    println!("{}", ui.box_bottom());
+    let _ = writeln!(out, "{}", ui.box_bottom());
 
     // ── Footnotes ────────────────────────────────────────────────────────
     let low_savings: Vec<_> = sorted
         .iter()
-        .filter(|(_, stats)| {
-            stats.runs >= 5
-                && stats.tokens_raw_total > 0
-                && (stats.tokens_saved_total as f64 / stats.tokens_raw_total as f64) < 0.1
-        })
+        .filter(|(_, stats)| stats.is_low_savings())
         .map(|(cmd, _)| (*cmd).clone())
         .collect();
 
     if !low_savings.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  {} low savings on {} — consider dropping the `l0-cache` prefix there",
             ui.yellow("⚠"),
             low_savings.join(", ")
         );
     }
-    println!(
+
+    let zero_output: Vec<_> = sorted
+        .iter()
+        .filter(|(_, stats)| stats.is_zero_output())
+        .map(|(cmd, _)| (*cmd).clone())
+        .collect();
+
+    if !zero_output.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {} no output to compress on {} — wrapping is pure overhead, drop the prefix",
+            ui.yellow("⚠"),
+            zero_output.join(", ")
+        );
+    }
+    let _ = writeln!(
+        out,
         "  {} {}",
         ui.dim("metrics"),
-        ui.dim(&path.display().to_string())
+        ui.dim(&agg.path.display().to_string())
     );
+    out
 }
 
 /// Render the Auto-tuning section inside the stats box: total firings, event
 /// breakdown, noisy counter, and the top commands by firing count. Honest by
 /// design — if the rule never matched, the section says exactly that.
-fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
-    println!("{}", ui.box_div());
+fn render_auto_tuning_section(out: &mut String, ui: &crate::ui::Ui, agg: &StatsAgg, name_w: usize) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "{}", ui.box_div());
 
     let firings = agg.auto_firings_total();
     let firings_pct = pct(firings, agg.total_runs);
 
     let mut row = ui.line();
     row.paint("38;5;245", "AUTO-TUNING");
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     let mut row = ui.line();
     row.paint("38;5;245", "Firings")
@@ -920,7 +1340,7 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
                 format_number(agg.total_runs)
             ),
         );
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     if firings == 0 {
         let mut row = ui.line();
@@ -928,7 +1348,7 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
             "38;5;238",
             "  — no rule matched in this window (auto-tuning quiet)",
         );
-        println!("{}", ui.box_row(row));
+        let _ = writeln!(out, "{}", ui.box_row(row));
         return;
     }
 
@@ -949,7 +1369,7 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
             "1",
             &format!("{:>3}", format_number(agg.auto_decay_strong_total)),
         );
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     let mut row = ui.line();
     row.text("  ")
@@ -964,8 +1384,14 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
         .paint(
             "1",
             &format!("{:>3}", format_number(agg.auto_decay_steady_total)),
+        )
+        .text("   ")
+        .paint("38;5;245", "recover ")
+        .paint(
+            "1",
+            &format!("{:>3}", format_number(agg.auto_recover_total)),
         );
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     // Noisy counter — false-positive expansions (failure-expand on empty
     // output, i.e. classic "no match" exit=1). High noisy% means the rule is
@@ -988,8 +1414,15 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
         );
     if agg.auto_noisy_total > 0 {
         row.text("  ").paint("33", "⚠");
+        // Date of the most recent noisy firing: in the all-time view this is
+        // how "stale pre-fix history" and "still happening" stay tellable.
+        if let Some(ts) = &agg.auto_noisy_last_ts {
+            let date = ts.split('T').next().unwrap_or(ts);
+            row.text(" ")
+                .paint("38;5;238", &format!("last {}", safe_label(date, 12)));
+        }
     }
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     // Top commands by firing count.
     let mut by_firings: Vec<(&String, &CmdStats)> = agg
@@ -998,7 +1431,14 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
         .filter(|(_, s)| s.auto_firings() > 0)
         .map(|(c, s)| (c, s))
         .collect();
-    by_firings.sort_by_key(|(_, s)| std::cmp::Reverse(s.auto_firings()));
+    // Stable input order (by_cmd is already deterministically sorted) plus a
+    // name tie-breaker: two commands tied on firings AND on the by_cmd keys
+    // would otherwise be ordering-unstable.
+    by_firings.sort_by(|(name_a, a), (name_b, b)| {
+        b.auto_firings()
+            .cmp(&a.auto_firings())
+            .then(name_a.cmp(name_b))
+    });
 
     if by_firings.is_empty() {
         return;
@@ -1006,10 +1446,10 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
 
     let mut row = ui.line();
     row.paint("38;5;245", "Top cmds (by firings)");
-    println!("{}", ui.box_row(row));
+    let _ = writeln!(out, "{}", ui.box_row(row));
 
     for (cmd, stats) in by_firings.iter().take(3) {
-        let cmd_disp = safe_label(cmd, 10);
+        let cmd_disp = safe_label(cmd, name_w);
         let total = stats.auto_firings();
         let mix = {
             let mut parts: Vec<String> = Vec::new();
@@ -1028,11 +1468,14 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
             if stats.auto_decay_steady > 0 {
                 parts.push(format!("Dsy:{}", stats.auto_decay_steady));
             }
+            if stats.auto_recover > 0 {
+                parts.push(format!("R:{}", stats.auto_recover));
+            }
             parts.join(" ")
         };
         let mut row = ui.line();
         row.text("  ")
-            .paint("38;5;252", &format!("{:<10}", cmd_disp))
+            .paint("38;5;252", &pad_cols(&cmd_disp, name_w))
             .text(" ")
             .paint("1", &format!("{:>4}", format_number(total)))
             .text("   ")
@@ -1043,8 +1486,15 @@ fn render_auto_tuning_section(ui: &crate::ui::Ui, agg: &StatsAgg) {
                 &format!("{} noisy ⚠", format_number(stats.auto_noisy)),
             );
         }
-        println!("{}", ui.box_row(row));
+        let _ = writeln!(out, "{}", ui.box_row(row));
     }
+
+    // Legend for the per-command mix — the abbreviations were undecipherable
+    // without reading the source (and Ds vs Dsy differ by one letter).
+    let mut row = ui.line();
+    row.text("  ")
+        .paint("38;5;238", "E=expand Dm/Ds/Dsy=decay P=shrink R=recover");
+    let _ = writeln!(out, "{}", ui.box_row(row));
 }
 
 /// Emit the aggregated stats as a single JSON object (for tooling / `--json`).
@@ -1069,6 +1519,7 @@ fn print_stats_json(agg: &StatsAgg, cost_per_mtok: f64) {
                     "decay_strong": s.auto_decay_strong,
                     "proactive_shrink": s.auto_proactive_shrink,
                     "decay_steady": s.auto_decay_steady,
+                    "recover_defaults": s.auto_recover,
                     "noisy": s.auto_noisy,
                 },
             });
@@ -1086,6 +1537,7 @@ fn print_stats_json(agg: &StatsAgg, cost_per_mtok: f64) {
         "tokens_saved": agg.total_saved,
         "tokens_raw": agg.total_raw,
         "efficiency_pct": round1(pct(agg.total_saved, agg.total_raw)),
+        "median_run_efficiency_pct": round1(agg.median_run_pct),
         "commands": commands,
         "auto_tuning": {
             "firings": firings_total,
@@ -1095,7 +1547,9 @@ fn print_stats_json(agg: &StatsAgg, cost_per_mtok: f64) {
             "decay_strong": agg.auto_decay_strong_total,
             "proactive_shrink": agg.auto_proactive_shrink_total,
             "decay_steady": agg.auto_decay_steady_total,
+            "recover_defaults": agg.auto_recover_total,
             "noisy": agg.auto_noisy_total,
+            "noisy_last_seen": agg.auto_noisy_last_ts,
             "noisy_pct": round1(pct(agg.auto_noisy_total, firings_total)),
         },
     });
@@ -1160,10 +1614,12 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
         "  {} consider dropping the prefix (overhead likely exceeds savings)",
         ui.yellow("●")
     );
+    // Same predicate as the --stats row marker and footer (single source of
+    // truth) — the two surfaces used to disagree on zero-output commands.
     let drop: Vec<_> = agg
         .by_cmd
         .iter()
-        .filter(|(_, s)| s.runs >= 5 && pct(s.tokens_saved_total, s.tokens_raw_total) < 10.0)
+        .filter(|(_, s)| s.is_low_value())
         .collect();
     if drop.is_empty() {
         println!("    {}", ui.dim("— none"));
@@ -1427,28 +1883,19 @@ pub fn run_doctor() {
                 err_count += 1;
             }
 
-            // Check lock file directory write access
-            let lock_path = metrics_file.with_extension("jsonl.lock");
-            match fs::create_dir(&lock_path) {
-                Ok(_) => {
-                    let _ = fs::remove_dir(&lock_path);
-                    println!("{}", ui.ok("Telemetry locking directory is writable."));
-                    ok_count += 1;
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    println!(
-                        "{}",
-                        ui.ok("Telemetry locking directory is writable (currently busy).")
-                    );
-                    ok_count += 1;
-                }
-                Err(e) => {
-                    println!(
-                        "{}",
-                        ui.err(&format!("Telemetry lock creation failed: {}", e))
-                    );
-                    err_count += 1;
-                }
+            // Probe the SAME lock protocol the binary uses (flock on unix,
+            // mkdir elsewhere) — probing the legacy mkdir path would test a
+            // mechanism production no longer exercises.
+            let mut probe = FileLock::for_data_file(&metrics_file);
+            if probe.lock() {
+                println!("{}", ui.ok("Telemetry lock is acquirable."));
+                ok_count += 1;
+            } else {
+                println!(
+                    "{}",
+                    ui.warn("Telemetry lock is busy or not acquirable (best-effort writes still proceed).")
+                );
+                warn_count += 1;
             }
         } else {
             println!(
@@ -1590,8 +2037,15 @@ pub fn run_doctor() {
     }
 }
 
+/// Unit tiers promote at the value where `{:.1}` rounding would otherwise
+/// overflow the previous tier: 999,950+ renders as "1000.0k" (7 chars,
+/// breaking the 6-wide table cells), so it must take the M branch instead.
+/// Same at the G boundary; with no tier above G the cell stays within 7
+/// chars up to ~999.9G tokens (practically unreachable beyond that).
 fn format_tokens(n: usize) -> String {
-    if n >= 1_000_000 {
+    if n >= 999_950_000 {
+        format!("{:.1}G", n as f64 / 1_000_000_000.0)
+    } else if n >= 999_950 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1}k", n as f64 / 1_000.0)
@@ -1601,7 +2055,9 @@ fn format_tokens(n: usize) -> String {
 }
 
 fn format_number(n: usize) -> String {
-    if n >= 1_000 {
+    if n >= 999_950 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         format!("{}", n)
@@ -1616,9 +2072,10 @@ pub struct AdaptiveParams {
     pub tail_error: usize,
     pub modified: bool,
     pub reason: Option<String>,
-    /// Which rule branch fired (if any). Recorded even when the numeric result
-    /// equals the default (e.g. ceiling/floor clamp), so "trigger fired" and
-    /// "value changed" are separately observable in telemetry.
+    /// Which rule branch fired, `Some` only when the params actually changed.
+    /// A trigger whose numeric result equals the seeded default (ceiling/floor
+    /// pinned) returns `None`: recording those as events inflated the --stats
+    /// Firings counter ~13x for floor-pinned buckets (one no-op event per run).
     pub event: Option<&'static str>,
 }
 
@@ -1634,6 +2091,26 @@ pub const ADAPTIVE_EVENT_PROACTIVE_SHRINK: &str = "proactive_shrink";
 /// that the consecutive-counting decay rule misses when the streak is broken
 /// by occasional non-truncated runs interleaved with truncated ones.
 pub const ADAPTIVE_EVENT_DECAY_STEADY: &str = "decay_steady";
+/// Recovery — the un-ratchet. Every other rule moves head/tail down and
+/// tail_error up only, compounding across runs with no way back; when the
+/// workload changes, a stale tune persisted months ago would otherwise keep
+/// truncating output that fits the configured base just fine. Fires when the
+/// persisted tune is demonstrably counterproductive (see the rule body).
+pub const ADAPTIVE_EVENT_RECOVER: &str = "recover_defaults";
+
+/// Clean (successful, non-truncated) consecutive runs required before an
+/// expanded `tail_error` is restored to its configured base.
+const RECOVER_CLEAN_MIN_RUNS: usize = 5;
+
+/// The config/CLI-resolved parameters a bucket would use if no tune had ever
+/// been persisted — the target the recovery rule restores toward. Captured in
+/// `main` BEFORE `lookup_tuned` seeding overwrites the resolved values.
+#[derive(Debug, Clone, Copy)]
+pub struct BaseParams {
+    pub head: usize,
+    pub tail: usize,
+    pub tail_error: usize,
+}
 
 const PROACTIVE_MIN_RUNS: usize = 20;
 const PROACTIVE_MAX_SCAN: usize = 50;
@@ -1712,12 +2189,19 @@ fn read_tail_lossy(path: &std::path::Path, max_bytes: u64) -> Option<String> {
 /// `args_hash` is the per-bucket key of the current run; the learner only
 /// considers history records whose own `args_hash` matches. Records from
 /// before Step 2 (no args_hash field) are skipped — graceful degradation.
+///
+/// `default_*` are the (possibly tune-seeded) values the run starts from;
+/// `base` is the pre-seed config/CLI resolution and `seeded_by` the event tag
+/// of the persisted tune that did the seeding — both used by the recovery rule.
+#[allow(clippy::too_many_arguments)]
 pub fn get_adaptive_params(
     cmd_name: &str,
     args_hash: &str,
     default_head: usize,
     default_tail: usize,
     default_tail_error: usize,
+    base: BaseParams,
+    seeded_by: Option<&str>,
     auto_floor: usize,
     auto_ceiling: usize,
 ) -> AdaptiveParams {
@@ -1760,13 +2244,15 @@ pub fn get_adaptive_params(
         }
     };
 
-    get_adaptive_params_from_content_with_limits(
+    get_adaptive_params_with_base(
         &content,
         cmd_name,
         args_hash,
         default_head,
         default_tail,
         default_tail_error,
+        base,
+        seeded_by,
         auto_floor,
         auto_ceiling,
     )
@@ -1803,7 +2289,10 @@ fn get_adaptive_params_from_content(
     )
 }
 
-/// Analyze metrics log content to compute tuned parameters with customizable floor and ceiling.
+/// Back-compat shim for the pre-recovery signature: `base` = the defaults,
+/// which makes the recovery rule inert (nothing to recover toward). The
+/// production path (`get_adaptive_params`) passes the real pre-seed base.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn get_adaptive_params_from_content_with_limits(
     content: &str,
@@ -1812,6 +2301,37 @@ fn get_adaptive_params_from_content_with_limits(
     default_head: usize,
     default_tail: usize,
     default_tail_error: usize,
+    auto_floor: usize,
+    auto_ceiling: usize,
+) -> AdaptiveParams {
+    get_adaptive_params_with_base(
+        content,
+        cmd_name,
+        args_hash,
+        default_head,
+        default_tail,
+        default_tail_error,
+        BaseParams {
+            head: default_head,
+            tail: default_tail,
+            tail_error: default_tail_error,
+        },
+        None,
+        auto_floor,
+        auto_ceiling,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn get_adaptive_params_with_base(
+    content: &str,
+    cmd_name: &str,
+    args_hash: &str,
+    default_head: usize,
+    default_tail: usize,
+    default_tail_error: usize,
+    base: BaseParams,
+    seeded_by: Option<&str>,
     auto_floor: usize,
     auto_ceiling: usize,
 ) -> AdaptiveParams {
@@ -1880,6 +2400,7 @@ fn get_adaptive_params_from_content_with_limits(
         if tuned_tail_error > auto_ceiling {
             tuned_tail_error = auto_ceiling;
         }
+        let modified = tuned_tail_error != default_tail_error;
         let reason = format!(
             "{} consecutive failures detected, expanding tail_error to {}",
             consecutive_failures, tuned_tail_error
@@ -1888,9 +2409,16 @@ fn get_adaptive_params_from_content_with_limits(
             head: default_head,
             tail: default_tail,
             tail_error: tuned_tail_error,
-            modified: tuned_tail_error != default_tail_error,
+            modified,
             reason: Some(reason),
-            event: Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR),
+            // No-op discipline: a ceiling-pinned trigger that changed nothing
+            // is not a firing. Mirrors check_decay_steady/check_proactive_shrink,
+            // and keeps the --stats Firings counter meaning "params changed".
+            event: if modified {
+                Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR)
+            } else {
+                None
+            },
         };
     }
 
@@ -1952,8 +2480,59 @@ fn get_adaptive_params_from_content_with_limits(
             tail_error: default_tail_error,
             modified,
             reason,
-            event: Some(event_tag),
+            // No-op discipline: a floor-pinned decay that changed nothing is
+            // not a firing — without this, a bucket sitting at the floor
+            // emits a decay event on EVERY run, inflating --stats forever.
+            event: if modified { Some(event_tag) } else { None },
         };
+    }
+
+    // 5b. Recovery (un-ratchet) — every other rule moves head/tail down and
+    // tail_error up only, compounding across runs with no way back. After a
+    // full window of clean (successful, non-truncated) runs:
+    //   - head/tail sitting below base are restored, UNLESS the bucket was
+    //     seeded by proactive_shrink — a clean streak is exactly the evidence
+    //     that justifies that rule (restoring would flip-flop with it). The
+    //     gate is an exclusion, not a decay allow-list, because tuned.jsonl
+    //     keeps ONE event tag per bucket and every firing overwrites it: a
+    //     later expand (or a partial recovery) re-tagging a decay-shrunk
+    //     bucket used to mask the head/tail restore forever.
+    //   - a tail_error expanded by the failure rule is restored to base: the
+    //     failures have stopped.
+    let clean_streak = history.len() >= RECOVER_CLEAN_MIN_RUNS
+        && history
+            .iter()
+            .take(RECOVER_CLEAN_MIN_RUNS)
+            .all(|m| m.exit_code == 0 && !m.truncated);
+    if clean_streak {
+        let proactive_seeded = seeded_by == Some(ADAPTIVE_EVENT_PROACTIVE_SHRINK);
+        let restore_head_tail =
+            !proactive_seeded && (default_head < base.head || default_tail < base.tail);
+        let restore_tail_error = default_tail_error > base.tail_error;
+        if restore_head_tail || restore_tail_error {
+            let (head, tail) = if restore_head_tail {
+                (base.head, base.tail)
+            } else {
+                (default_head, default_tail)
+            };
+            let tail_error = if restore_tail_error {
+                base.tail_error
+            } else {
+                default_tail_error
+            };
+            let reason = format!(
+                "{} clean runs — restoring head={} tail={} tail_error={}",
+                RECOVER_CLEAN_MIN_RUNS, head, tail, tail_error
+            );
+            return AdaptiveParams {
+                head,
+                tail,
+                tail_error,
+                modified: true,
+                reason: Some(reason),
+                event: Some(ADAPTIVE_EVENT_RECOVER),
+            };
+        }
     }
 
     // 6. Step 4 — Steady-state decay. Catches the "consistently truncated"
@@ -2211,7 +2790,13 @@ mod tests {
         let long = safe_label("abcdefghijklmnop", 10);
         assert_eq!(long.chars().count(), 10);
         assert!(long.ends_with('…'));
-        assert_eq!(safe_label("日本語表示テスト長い名前", 5).chars().count(), 5);
+        // Wide (CJK) names clamp by display COLUMNS, not chars: width 5 fits
+        // two double-width chars (4 cols) plus the single-width ellipsis.
+        let wide = safe_label("日本語表示テスト長い名前", 5);
+        assert_eq!(wide, "日本…");
+        assert!(crate::ui::vis_len(&wide) <= 5);
+        // And pad_cols pads by columns so the cell stays aligned.
+        assert_eq!(crate::ui::vis_len(&pad_cols(&wide, 10)), 10);
     }
 
     #[test]
@@ -2275,6 +2860,14 @@ mod tests {
         assert_eq!(format_tokens(500), "500");
         assert_eq!(format_tokens(1500), "1.5k");
         assert_eq!(format_tokens(1_500_000), "1.5M");
+        // Rounding boundaries promote to the next unit instead of overflowing
+        // the 6-char cell ("1000.0k" / "1000.0M").
+        assert_eq!(format_tokens(999_950), "1.0M");
+        assert_eq!(format_tokens(999_949), "999.9k");
+        assert_eq!(format_tokens(999_950_000), "1.0G");
+        assert_eq!(format_tokens(2_500_000_000), "2.5G");
+        assert_eq!(format_number(999_950), "1.0M");
+        assert_eq!(format_number(999_949), "999.9k");
     }
 
     // ── New comprehensive tests ─────────────────────────────────────────
@@ -2877,7 +3470,7 @@ mod tests {
         // Initial lock acquisition
         let mut lock1 = FileLock::new(lock_path.clone());
         assert!(lock1.lock(), "First lock acquisition should succeed");
-        assert!(lock1.acquired);
+        assert!(lock1.acquired());
 
         // Attempting to lock while lock1 is held should fail
         let mut lock2 = FileLock::new(lock_path.clone());
@@ -2885,7 +3478,7 @@ mod tests {
             !lock2.lock(),
             "Second lock acquisition should fail while first is held"
         );
-        assert!(!lock2.acquired);
+        assert!(!lock2.acquired());
 
         // Drop lock1 to release the lock
         std::mem::drop(lock1);
@@ -2895,7 +3488,7 @@ mod tests {
             lock2.lock(),
             "Lock acquisition should succeed after release"
         );
-        assert!(lock2.acquired);
+        assert!(lock2.acquired());
 
         // Drop lock2
         std::mem::drop(lock2);
@@ -3156,21 +3749,42 @@ mod tests {
         assert!(params.modified, "tail_error should have grown");
     }
 
-    /// Honesty check: the event is recorded EVEN when the numeric result was
-    /// clamped to the ceiling (i.e. `modified == false`). "Trigger fired" and
-    /// "value changed" must be separately observable.
+    /// No-op discipline: when the numeric result is clamped to the ceiling
+    /// (i.e. `modified == false`) NO event is recorded — a pinned trigger
+    /// that changed nothing would otherwise emit one no-op event per run,
+    /// permanently inflating the --stats Firings counter for that bucket.
     #[test]
-    fn adaptive_event_expand_set_even_when_ceiling_clamped_to_default() {
+    fn adaptive_event_expand_none_when_ceiling_clamped_to_default() {
         // default_tail_error = 200, ceiling = 200 → tuned = 400 → clamped to 200
-        // (== default), so modified=false BUT the rule did fire.
+        // (== default), so modified=false and the firing is suppressed.
         let content = r#"{"cmd":"cargo","exit_code":1,"truncated":true,"lines_raw":50}
 "#;
         let params = get_adaptive_params_from_content_with_limits(
             content, "cargo", "", 30, 30, 200, 10, 200,
         );
-        assert_eq!(params.event, Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR));
+        assert_eq!(params.event, None, "ceiling-pinned trigger is not a firing");
         assert_eq!(params.tail_error, 200);
         assert!(!params.modified, "ceiling-clamp leaves value at default");
+    }
+
+    /// No-op discipline for the decay branch: head/tail already at the floor →
+    /// the decay trigger changes nothing → no event.
+    #[test]
+    fn adaptive_event_decay_none_when_floor_pinned() {
+        let content = r#"{"cmd":"cargo","exit_code":0,"truncated":true}
+{"cmd":"cargo","exit_code":0,"truncated":true}
+{"cmd":"cargo","exit_code":0,"truncated":true}
+{"cmd":"cargo","exit_code":0,"truncated":true}
+{"cmd":"cargo","exit_code":0,"truncated":true}
+"#;
+        // defaults head=10 tail=10 with floor=10: decay computes 6/6 → floored
+        // back to 10/10 == defaults → modified=false → event must be None.
+        let params = get_adaptive_params_from_content_with_limits(
+            content, "cargo", "", 10, 10, 120, 10, 1000,
+        );
+        assert_eq!(params.event, None, "floor-pinned decay is not a firing");
+        assert!(!params.modified);
+        assert_eq!((params.head, params.tail), (10, 10));
     }
 
     /// 3 consecutive truncated successes → `decay_moderate`.
@@ -3208,6 +3822,702 @@ mod tests {
         assert_eq!(params.event, None);
     }
 
+    // ── Recovery rule (un-ratchet) ───────────────────────────────────────────
+
+    const CLEAN_5: &str = r#"{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":5}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":6}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":4}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":5}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":7}
+"#;
+
+    const RECOVERY_BASE: BaseParams = BaseParams {
+        head: 30,
+        tail: 30,
+        tail_error: 120,
+    };
+
+    /// Bucket seeded at 10/10 by a truncation-driven decay; the truncations
+    /// have stopped (5 clean runs) → the tune is stale → restore base.
+    #[test]
+    fn recovery_restores_base_after_clean_streak_on_decay_seed() {
+        let params = get_adaptive_params_with_base(
+            CLEAN_5,
+            "cargo",
+            "",
+            10,
+            10,
+            120,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_DECAY_STRONG),
+            10,
+            1000,
+        );
+        assert_eq!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+        assert!(params.modified);
+        assert_eq!((params.head, params.tail), (30, 30));
+    }
+
+    /// A proactive_shrink seed is CONFIRMED by clean runs — recovery must not
+    /// undo it (that would flip-flop with the proactive rule).
+    #[test]
+    fn recovery_skips_proactive_shrink_seeds() {
+        let params = get_adaptive_params_with_base(
+            CLEAN_5,
+            "cargo",
+            "",
+            12,
+            10,
+            120,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_PROACTIVE_SHRINK),
+            10,
+            1000,
+        );
+        assert_ne!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+    }
+
+    /// Still truncating (no clean streak) → decay keeps ownership; recovery
+    /// must not fire while the tune is still earning its keep.
+    #[test]
+    fn recovery_does_not_fire_while_still_truncating() {
+        let content = r#"{"cmd":"cargo","exit_code":0,"truncated":true,"lines_raw":500}
+{"cmd":"cargo","exit_code":0,"truncated":true,"lines_raw":480}
+{"cmd":"cargo","exit_code":0,"truncated":true,"lines_raw":510}
+"#;
+        let params = get_adaptive_params_with_base(
+            content,
+            "cargo",
+            "",
+            10,
+            10,
+            120,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_DECAY_STRONG),
+            10,
+            1000,
+        );
+        assert_ne!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+    }
+
+    /// An expanded tail_error (seeded above base by the failure rule) is
+    /// restored after a clean window regardless of the seed tag; head/tail
+    /// stay put when they weren't decay-seeded.
+    #[test]
+    fn recovery_restores_tail_error_after_clean_streak() {
+        let params = get_adaptive_params_with_base(
+            CLEAN_5,
+            "cargo",
+            "",
+            30,
+            30,
+            600,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR),
+            10,
+            1000,
+        );
+        assert_eq!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+        assert_eq!(params.tail_error, 120);
+        assert_eq!((params.head, params.tail), (30, 30));
+    }
+
+    /// With base == seeded values (the back-compat shim) recovery never fires.
+    #[test]
+    fn recovery_inert_when_base_equals_defaults() {
+        let params = get_adaptive_params_from_content(CLEAN_5, "cargo", 30, 30, 120);
+        assert_ne!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+    }
+
+    // ── Tuned-entry TTL ─────────────────────────────────────────────────────
+
+    #[test]
+    fn tuned_entry_ttl_filters_stale_and_garbage_timestamps() {
+        let now = 1_780_000_000; // arbitrary fixed "now"
+        let fresh = TunedParams {
+            ts: to_rfc3339(now - 86400), // 1 day old
+            ..Default::default()
+        };
+        let stale = TunedParams {
+            ts: to_rfc3339(now - 40 * 86400), // 40 days old
+            ..Default::default()
+        };
+        let garbage = TunedParams {
+            ts: "b".to_string(),
+            ..Default::default()
+        };
+        assert!(tuned_entry_fresh(&fresh, now));
+        assert!(!tuned_entry_fresh(&stale, now));
+        assert!(!tuned_entry_fresh(&garbage, now));
+    }
+
+    #[test]
+    fn lookup_tuned_ignores_expired_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "l0-cache-ttl-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tuned.jsonl");
+        let stale = TunedParams {
+            ts: "2020-01-01T00:00:00Z".to_string(),
+            cmd: "cargo".to_string(),
+            args_hash: "aaaa".to_string(),
+            head: 10,
+            tail: 10,
+            tail_error: 120,
+            event: "decay_strong".to_string(),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&stale).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            lookup_tuned_at_path(&path, "cargo", "aaaa").is_none(),
+            "a 2020 tune must not seed runs"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Dashboard rendering (render_stats_text) ──────────────────────────────
+
+    fn mono_ui() -> crate::ui::Ui {
+        crate::ui::Ui {
+            color: false,
+            inner: crate::ui::INNER,
+        }
+    }
+
+    fn rec(cmd: &str, raw: usize, saved: usize, event: Option<&str>) -> String {
+        let ev = event
+            .map(|e| format!(",\"adaptive_event\":\"{}\"", e))
+            .unwrap_or_default();
+        format!(
+            "{{\"ts\":\"2026-06-10T12:00:00Z\",\"cmd\":\"{}\",\"tokens_raw\":{},\"tokens_saved\":{},\"exit_code\":0{}}}",
+            cmd, raw, saved, ev
+        )
+    }
+
+    fn render(content: &str) -> String {
+        let agg = aggregate_content(content, None).expect("agg");
+        render_stats_text(&agg, &mono_ui(), None, 0.0)
+    }
+
+    /// The table row for `cmd` — prefix-anchored so it can't match the
+    /// dominance line or footers that merely mention the name.
+    fn table_row<'a>(out: &'a str, cmd: &str) -> &'a str {
+        out.lines()
+            .find(|l| l.starts_with(&format!("│ {}", cmd)))
+            .unwrap_or_else(|| panic!("no table row for {cmd} in:\n{out}"))
+    }
+
+    /// "100.0%" is reserved for saved == raw; 99.997% must floor to 99.9%.
+    #[test]
+    fn render_never_fabricates_100_pct() {
+        let content = [rec("dd", 100_000, 99_997, None), rec("cp", 500, 500, None)].join("\n");
+        let out = render(&content);
+        let dd_row = table_row(&out, "dd");
+        assert!(dd_row.contains("99.9%"), "dd row: {dd_row}");
+        assert!(!dd_row.contains("100.0%"), "dd row: {dd_row}");
+        let cp_row = table_row(&out, "cp");
+        assert!(
+            cp_row.contains("100.0%"),
+            "true 100% keeps its label: {cp_row}"
+        );
+    }
+
+    /// The actionable ⚠ low marker wins over ↑ most saved on row 0.
+    #[test]
+    fn render_low_marker_wins_over_most_saved() {
+        let content = (0..6)
+            .map(|_| rec("sloth", 10_000, 100, None))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = render(&content);
+        let row = table_row(&out, "sloth");
+        assert!(row.contains("⚠ low"), "row: {row}");
+        assert!(!row.contains("most saved"), "row: {row}");
+    }
+
+    /// Healthy top row carries ↑ most saved; sub-sample red rows say (n<5).
+    #[test]
+    fn render_most_saved_and_small_sample_qualifier() {
+        let content = [rec("curl", 10_000, 7_400, None), rec("od", 1_000, 13, None)].join("\n");
+        let out = render(&content);
+        let curl_row = table_row(&out, "curl");
+        assert!(curl_row.contains("↑ most saved"), "row: {curl_row}");
+        let od_row = table_row(&out, "od");
+        assert!(od_row.contains("(n<5)"), "row: {od_row}");
+        assert!(!od_row.contains("⚠ low"), "row: {od_row}");
+    }
+
+    /// IMPACT bar is share-of-total-savings, not efficiency: two commands with
+    /// EQUAL efficiency but 9:1 share render very different bars.
+    #[test]
+    fn render_impact_bar_tracks_share_not_efficiency() {
+        let mut lines: Vec<String> = (0..9).map(|_| rec("big", 10_000, 9_000, None)).collect();
+        lines.push(rec("small", 1_000, 900, None));
+        let out = render(&lines.join("\n"));
+        let bar_cells = |row: &str| row.chars().filter(|c| *c == '█').count();
+        let big = table_row(&out, "big");
+        let small = table_row(&out, "small");
+        // Equal efficiency (90.0%), shares 90%/10% → fills ~11.4 vs ~3.8 cells.
+        assert!(
+            bar_cells(big) >= 10 && bar_cells(small) <= 4,
+            "big: {} cells, small: {} cells",
+            bar_cells(big),
+            bar_cells(small)
+        );
+    }
+
+    /// Headline extras: unit label, unweighted median, dominance disclosure.
+    #[test]
+    fn render_headline_unit_median_dominance() {
+        let content = [
+            rec("dd", 100_000, 90_000, None),
+            rec("ls", 1_000, 500, None),
+            rec("ls", 1_000, 400, None),
+        ]
+        .join("\n");
+        let out = render(&content);
+        assert!(out.contains("est. tokens"), "unit label missing");
+        assert!(out.contains("Median/run"), "median row missing");
+        // Median of [90, 50, 40] = 50.0 (unweighted), vs weighted 89.1%.
+        assert!(out.contains("50.0%"), "median value missing:\n{out}");
+        assert!(
+            out.contains("dd accounts for 9") && out.contains("% of savings"),
+            "dominance line missing:\n{out}"
+        );
+    }
+
+    /// No dominance line when savings are spread out.
+    #[test]
+    fn render_no_dominance_line_when_balanced() {
+        let content = [
+            rec("a", 1_000, 400, None),
+            rec("b", 1_000, 350, None),
+            rec("c", 1_000, 300, None),
+        ]
+        .join("\n");
+        let out = render(&content);
+        assert!(!out.contains("accounts for"), "spurious dominance:\n{out}");
+    }
+
+    /// Footers: low-savings and zero-output commands get separate hints; the
+    /// auto-tuning legend renders when there are firings.
+    #[test]
+    fn render_footers_and_legend() {
+        let mut lines: Vec<String> = (0..6).map(|_| rec("echo", 100, 0, None)).collect();
+        for _ in 0..6 {
+            lines.push(rec("exit", 0, 0, None));
+        }
+        lines.push(rec(
+            "cargo",
+            10_000,
+            9_000,
+            Some(ADAPTIVE_EVENT_DECAY_STRONG),
+        ));
+        let out = render(&lines.join("\n"));
+        assert!(
+            out.contains("low savings on echo"),
+            "low-savings footer missing:\n{out}"
+        );
+        assert!(
+            out.contains("no output to compress on exit"),
+            "zero-output footer missing:\n{out}"
+        );
+        assert!(
+            out.contains("E=expand Dm/Ds/Dsy=decay P=shrink R=recover"),
+            "legend missing:\n{out}"
+        );
+    }
+
+    /// Wider terminals widen the COMMAND column instead of wasting the space.
+    #[test]
+    fn render_wide_terminal_grows_command_column() {
+        let content = rec("a-rather-long-command-name", 1_000, 900, None);
+        let narrow = render_stats_text(
+            &aggregate_content(&content, None).unwrap(),
+            &mono_ui(),
+            None,
+            0.0,
+        );
+        let wide_ui = crate::ui::Ui {
+            color: false,
+            inner: crate::ui::INNER + 14,
+        };
+        let wide = render_stats_text(
+            &aggregate_content(&content, None).unwrap(),
+            &wide_ui,
+            None,
+            0.0,
+        );
+        assert!(narrow.contains("a-rather-…"), "narrow truncates: {narrow}");
+        // name_w grows 10 → 24: 23 name chars + the ellipsis.
+        assert!(
+            wide.contains("a-rather-long-command-n…"),
+            "wide shows more of the name:\n{wide}"
+        );
+    }
+
+    /// Fully parameterized record fixture (rec() pins exit_code=0, no ts).
+    fn rec_at(
+        cmd: &str,
+        raw: usize,
+        saved: usize,
+        event: Option<&str>,
+        ts: &str,
+        exit_code: i32,
+        lines_raw: usize,
+    ) -> String {
+        let ev = event
+            .map(|e| format!(",\"adaptive_event\":\"{}\"", e))
+            .unwrap_or_default();
+        format!(
+            "{{\"ts\":\"{}\",\"cmd\":\"{}\",\"tokens_raw\":{},\"tokens_saved\":{},\"exit_code\":{},\"lines_raw\":{}{}}}",
+            ts, cmd, raw, saved, exit_code, lines_raw, ev
+        )
+    }
+
+    /// Tampered record (saved > raw) is clamped at ingestion: every surface —
+    /// per-row pct, headline, median — agrees instead of fmt_pct clamping the
+    /// text while the median/JSON leaked 5000%.
+    #[test]
+    fn render_clamps_tampered_saved_above_raw() {
+        let out = render(&rec("evil", 100, 5000, None));
+        assert!(!out.contains("5000.0%"), "raw >100% leaked:\n{out}");
+        let row = table_row(&out, "evil");
+        assert!(row.contains("100.0%"), "clamped row: {row}");
+        // fmt_pct itself also refuses the fabricated 100.0% on unclamped input.
+        assert_eq!(fmt_pct(5000, 100), "99.9%");
+        assert_eq!(fmt_pct(100, 100), "100.0%");
+    }
+
+    /// Windowed aggregation: records before the cutoff are excluded.
+    #[test]
+    fn aggregate_content_honors_cutoff() {
+        let old_ts = "2026-01-01T00:00:00Z";
+        let new_ts = "2026-06-10T12:00:00Z";
+        let content = [
+            rec_at("old", 1000, 500, None, old_ts, 0, 10),
+            rec_at("new", 1000, 500, None, new_ts, 0, 10),
+        ]
+        .join("\n");
+        let cutoff = parse_rfc3339_to_secs("2026-06-01T00:00:00Z").unwrap();
+        let agg = aggregate_content(&content, Some(cutoff)).expect("agg");
+        assert_eq!(agg.total_runs, 1);
+        assert_eq!(agg.by_cmd[0].0, "new");
+    }
+
+    /// noisy_last_ts keeps the MAX timestamp across noisy firings and renders
+    /// as a `last <date>` suffix next to the ⚠.
+    #[test]
+    fn noisy_last_seen_is_max_ts_and_rendered() {
+        let content = [
+            rec_at(
+                "probe",
+                0,
+                0,
+                Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR),
+                "2026-06-01T10:00:00Z",
+                1,
+                0,
+            ),
+            rec_at(
+                "probe",
+                0,
+                0,
+                Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR),
+                "2026-06-03T10:00:00Z",
+                1,
+                0,
+            ),
+            rec_at(
+                "probe",
+                0,
+                0,
+                Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR),
+                "2026-06-02T10:00:00Z",
+                1,
+                0,
+            ),
+        ]
+        .join("\n");
+        let agg = aggregate_content(&content, None).expect("agg");
+        assert_eq!(agg.auto_noisy_total, 3);
+        assert_eq!(
+            agg.auto_noisy_last_ts.as_deref(),
+            Some("2026-06-03T10:00:00Z")
+        );
+        let out = render_stats_text(&agg, &mono_ui(), None, 0.0);
+        assert!(out.contains("last 2026-06-03"), "missing last-date:\n{out}");
+    }
+
+    /// Dominance line boundary: exactly 50% stays silent, just above speaks.
+    #[test]
+    fn dominance_line_strictly_above_half() {
+        let half = [rec("a", 1000, 400, None), rec("b", 1000, 400, None)].join("\n");
+        let out = render(&half);
+        assert!(
+            !out.contains("accounts for"),
+            "50/50 must be silent:\n{out}"
+        );
+        let above = [rec("a", 1000, 401, None), rec("b", 1000, 399, None)].join("\n");
+        let out = render(&above);
+        assert!(
+            out.contains("a accounts for"),
+            "50.1% must disclose:\n{out}"
+        );
+    }
+
+    /// TTL boundaries: exactly TTL-old is fresh, one second older expired;
+    /// near-future skew tolerated, far-future expired (immortal-tune guard).
+    #[test]
+    fn tuned_ttl_exact_boundaries_and_future_skew() {
+        let now = 1_780_000_000;
+        let mk = |ts: u64| TunedParams {
+            ts: to_rfc3339(ts),
+            ..Default::default()
+        };
+        assert!(tuned_entry_fresh(&mk(now - TUNED_TTL_SECS), now));
+        assert!(!tuned_entry_fresh(&mk(now - TUNED_TTL_SECS - 1), now));
+        assert!(tuned_entry_fresh(&mk(now + TUNED_FUTURE_SKEW_SECS), now));
+        assert!(!tuned_entry_fresh(
+            &mk(now + TUNED_FUTURE_SKEW_SECS + 1),
+            now
+        ));
+    }
+
+    /// Compaction physically prunes another bucket's expired entry.
+    #[test]
+    fn save_tuned_compaction_prunes_stale_other_bucket() {
+        let path = step5_tmp_path("prune-stale");
+        let stale = TunedParams {
+            ts: "2020-01-01T00:00:00Z".to_string(),
+            cmd: "old".to_string(),
+            args_hash: "dead".to_string(),
+            head: 10,
+            tail: 10,
+            tail_error: 120,
+            event: "decay_strong".to_string(),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&stale).unwrap()),
+        )
+        .unwrap();
+        let fresh = TunedParams {
+            ts: rfc3339_now(),
+            cmd: "new".to_string(),
+            args_hash: "beef".to_string(),
+            head: 20,
+            tail: 20,
+            tail_error: 120,
+            event: "decay_moderate".to_string(),
+        };
+        save_tuned_at_path(&path, &fresh, true);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("\"old\""),
+            "stale entry not pruned: {content}"
+        );
+        assert!(content.contains("\"new\""));
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A garbage-ts LATER line must not hide a fresh earlier entry (TTL is
+    /// applied during the scan, matching compaction).
+    #[test]
+    fn lookup_tuned_garbage_later_line_does_not_mask_fresh_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "l0-cache-ttl-mask-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tuned.jsonl");
+        let fresh = TunedParams {
+            ts: rfc3339_now(),
+            cmd: "cargo".to_string(),
+            args_hash: "aaaa".to_string(),
+            head: 12,
+            tail: 12,
+            tail_error: 120,
+            event: "decay_strong".to_string(),
+        };
+        let garbage = TunedParams {
+            ts: "b".to_string(),
+            cmd: "cargo".to_string(),
+            args_hash: "aaaa".to_string(),
+            head: 99,
+            tail: 99,
+            tail_error: 999,
+            event: "decay_strong".to_string(),
+        };
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&fresh).unwrap(),
+                serde_json::to_string(&garbage).unwrap()
+            ),
+        )
+        .unwrap();
+        let got = lookup_tuned_at_path(&path, "cargo", "aaaa").expect("fresh entry found");
+        assert_eq!(got.head, 12, "garbage later line masked the fresh tune");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Degraded save path: with the lock unavailable (a directory squatting
+    /// the flock path), save_tuned falls back to a plain append instead of a
+    /// whole-file rewrite from a possibly-stale snapshot.
+    #[test]
+    fn save_tuned_appends_when_lock_unavailable() {
+        let path = step5_tmp_path("degraded-append");
+        let other = TunedParams {
+            ts: rfc3339_now(),
+            cmd: "other".to_string(),
+            args_hash: "bbbb".to_string(),
+            head: 25,
+            tail: 25,
+            tail_error: 120,
+            event: "decay_moderate".to_string(),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&other).unwrap()),
+        )
+        .unwrap();
+        // Make the flock path unopenable: a DIRECTORY at <path>.flock.
+        let flock_path = path.with_extension("jsonl.flock");
+        fs::create_dir_all(&flock_path).unwrap();
+        let mine = TunedParams {
+            ts: rfc3339_now(),
+            cmd: "mine".to_string(),
+            args_hash: "cccc".to_string(),
+            head: 15,
+            tail: 15,
+            tail_error: 120,
+            event: "decay_strong".to_string(),
+        };
+        save_tuned_at_path(&path, &mine, true);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("\"other\""),
+            "append must not drop entries"
+        );
+        assert!(content.contains("\"mine\""), "entry must still be saved");
+        let _ = fs::remove_dir_all(&flock_path);
+        let _ = fs::remove_file(&path);
+    }
+
+    // ── Recovery boundaries ──────────────────────────────────────────────────
+
+    /// 4 clean + 1 truncated oldest in the window → NOT a full clean streak →
+    /// no recovery (pins RECOVER_CLEAN_MIN_RUNS = 5 and the take()). The
+    /// truncated record is the FIRST line: records are file-ordered, so it is
+    /// the oldest of the 5-run window.
+    #[test]
+    fn recovery_requires_full_clean_window() {
+        let content = r#"{"cmd":"cargo","exit_code":0,"truncated":true,"lines_raw":300}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":6}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":4}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":5}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":5}
+"#;
+        let params = get_adaptive_params_with_base(
+            content,
+            "cargo",
+            "",
+            10,
+            10,
+            120,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_DECAY_STRONG),
+            10,
+            1000,
+        );
+        assert_ne!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+    }
+
+    /// Both axes away from base restore together in ONE firing — a partial
+    /// recovery used to re-tag the bucket and mask the other axis forever.
+    #[test]
+    fn recovery_restores_all_axes_in_one_firing() {
+        let params = get_adaptive_params_with_base(
+            CLEAN_5,
+            "cargo",
+            "",
+            10,
+            10,
+            600,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_DECAY_STRONG),
+            10,
+            1000,
+        );
+        assert_eq!(params.event, Some(ADAPTIVE_EVENT_RECOVER));
+        assert_eq!((params.head, params.tail, params.tail_error), (30, 30, 120));
+    }
+
+    /// Tag-overwrite stuck states (the review's main correctness finding):
+    /// a bucket shrunk by decay but re-tagged by a later expand — or by a
+    /// partial recovery — must still restore head/tail on a clean streak.
+    #[test]
+    fn recovery_fires_despite_expand_or_recover_tag_overwrite() {
+        for tag in [ADAPTIVE_EVENT_EXPAND_TAIL_ERR, ADAPTIVE_EVENT_RECOVER] {
+            let params = get_adaptive_params_with_base(
+                CLEAN_5,
+                "cargo",
+                "",
+                10,
+                10,
+                120,
+                RECOVERY_BASE,
+                Some(tag),
+                10,
+                1000,
+            );
+            assert_eq!(
+                params.event,
+                Some(ADAPTIVE_EVENT_RECOVER),
+                "seed tag {tag} must not mask the head/tail restore"
+            );
+            assert_eq!((params.head, params.tail), (30, 30));
+        }
+    }
+
+    /// Most-recent run failing (with output) → the expand rule owns the turn.
+    /// (Records are file-ordered: the LAST line is the most recent run.)
+    #[test]
+    fn recovery_yields_to_expand_on_recent_failure() {
+        let content = r#"{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":5}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":6}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":4}
+{"cmd":"cargo","exit_code":0,"truncated":false,"lines_raw":5}
+{"cmd":"cargo","exit_code":1,"truncated":false,"lines_raw":50}
+"#;
+        let params = get_adaptive_params_with_base(
+            content,
+            "cargo",
+            "",
+            10,
+            10,
+            120,
+            RECOVERY_BASE,
+            Some(ADAPTIVE_EVENT_DECAY_STRONG),
+            10,
+            1000,
+        );
+        assert_eq!(params.event, Some(ADAPTIVE_EVENT_EXPAND_TAIL_ERR));
+    }
+
     // ── StatsAgg arithmetic + noisy classification ───────────────────────────
 
     /// Helper: builds a CmdStats with explicit auto-tune counters.
@@ -3221,6 +4531,7 @@ mod tests {
             auto_decay_strong: ds,
             auto_proactive_shrink: ps,
             auto_decay_steady: dsy,
+            auto_recover: 0,
             auto_noisy: noisy,
         }
     }
@@ -3244,13 +4555,16 @@ mod tests {
             total_runs: 100,
             total_saved: 0,
             total_raw: 0,
+            median_run_pct: 0.0,
             by_cmd: Vec::new(),
             auto_expand_total: 5,
             auto_decay_mod_total: 7,
             auto_decay_strong_total: 3,
             auto_proactive_shrink_total: 4,
             auto_decay_steady_total: 6,
+            auto_recover_total: 0,
             auto_noisy_total: 2,
+            auto_noisy_last_ts: None,
         };
         assert_eq!(agg.auto_firings_total(), 25);
     }
@@ -3839,8 +5153,16 @@ mod tests {
     #[test]
     fn step5_last_write_wins_for_same_bucket() {
         let path = step5_tmp_path("lastwin");
+        // Timestamps must be real and recent: the TTL filter drops entries it
+        // can't parse or that are older than 30 days.
+        let now = now_unix_secs();
+        let (ts1, ts2, ts3) = (
+            to_rfc3339(now - 3),
+            to_rfc3339(now - 2),
+            to_rfc3339(now - 1),
+        );
         let mut t = TunedParams {
-            ts: "t1".to_string(),
+            ts: ts1,
             cmd: "x".to_string(),
             args_hash: "h".to_string(),
             head: 30,
@@ -3851,16 +5173,19 @@ mod tests {
         save_tuned_at_path(&path, &t, true);
         t.head = 21;
         t.tail = 21;
-        t.ts = "t2".to_string();
+        t.ts = ts2;
         save_tuned_at_path(&path, &t, true);
         t.head = 14;
         t.tail = 14;
-        t.ts = "t3".to_string();
+        t.ts = ts3.clone();
         save_tuned_at_path(&path, &t, true);
         let got = lookup_tuned_at_path(&path, "x", "h").expect("found");
         assert_eq!(got.head, 14);
         assert_eq!(got.tail, 14);
-        assert_eq!(got.ts, "t3");
+        assert_eq!(got.ts, ts3);
+        // Compaction: three saves to the same bucket → exactly one line.
+        let lines = std::fs::read_to_string(&path).unwrap().lines().count();
+        assert_eq!(lines, 1, "same-bucket saves must compact to one line");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3868,10 +5193,11 @@ mod tests {
     #[test]
     fn step5_lookup_isolates_buckets() {
         let path = step5_tmp_path("isolate");
+        let now = now_unix_secs();
         save_tuned_at_path(
             &path,
             &TunedParams {
-                ts: "a".into(),
+                ts: to_rfc3339(now - 2),
                 cmd: "x".into(),
                 args_hash: "aaaa".into(),
                 head: 10,
@@ -3884,7 +5210,7 @@ mod tests {
         save_tuned_at_path(
             &path,
             &TunedParams {
-                ts: "b".into(),
+                ts: to_rfc3339(now - 1),
                 cmd: "x".into(),
                 args_hash: "bbbb".into(),
                 head: 50,
@@ -3907,10 +5233,13 @@ mod tests {
     #[test]
     fn step5_malformed_lines_skipped_gracefully() {
         let path = step5_tmp_path("malformed");
-        let body = concat!(
-            "this is not json\n",
-            "{}\n",
-            "{\"cmd\":\"good\",\"args_hash\":\"h\",\"head\":11,\"tail\":11,\"tail_error\":120,\"event\":\"decay\",\"ts\":\"x\"}\n",
+        let body = format!(
+            concat!(
+                "this is not json\n",
+                "{{}}\n",
+                "{{\"cmd\":\"good\",\"args_hash\":\"h\",\"head\":11,\"tail\":11,\"tail_error\":120,\"event\":\"decay\",\"ts\":\"{}\"}}\n",
+            ),
+            to_rfc3339(now_unix_secs())
         );
         std::fs::write(&path, body).unwrap();
         let got = lookup_tuned_at_path(&path, "good", "h").expect("good record found");

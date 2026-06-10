@@ -4,6 +4,124 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-06-11
+
+Full-findings remediation of the `--stats`/telemetry audit: every confirmed
+bug fixed one at a time with a verification step, plus an honest-by-design
+dashboard refresh.
+
+### Fixed
+- **Integration tests no longer pollute the real telemetry.** Four tests
+  (`binary_output_does_not_hang`, `exit_code_propagation`, `pipe_to_head`,
+  `integration_auto_flag_accepted`) spawned the real binary without
+  `XDG_DATA_HOME` isolation — one `dd`/`exit`/`seq`/`echo hello` record per
+  `cargo test` run landed in the user's `metrics.jsonl` (90%+ of the
+  headline "Saved" was test artifacts) and even trained `tuned.jsonl` on
+  benchmark workloads. All four are now isolated like the rest of the suite.
+- **Unknown leading flags are rejected** (exit 2, no metric written). A typo
+  like `l0-cache --nonexistant grep …` used to be swallowed as the command,
+  fail completely silently (`sh` rejected it with the error going to a nulled
+  stderr), and pollute the stats table with a flag-named row forever.
+- **No-op auto-tuning triggers are no longer recorded as firings.** A
+  floor-pinned decay (or ceiling-pinned expand) emitted one event per run,
+  inflating the `Firings` counter ~13× for buckets sitting at the floor.
+- **Invalid `--since` values are an error (exit 2) — BREAKING** for scripts
+  that piped `--stats --json` with a bad window and relied on the silent
+  all-time fallback (`--since 7days` showed all-time totals labeled
+  "last 7days"). Validation is unconditional (run mode included), values
+  are trimmed, a leading `+` is rejected, and a valid `--since` without
+  `--stats`/`--discover` warns that it has no effect.
+- **The low-value predicate is one function** shared by the `⚠ low` row
+  marker, the footer hints, and `--discover` (they used to disagree), and
+  zero-output commands (≥5 runs, 0 raw tokens — e.g. a hook wrapping `exit`)
+  are finally flagged: "no output to compress — wrapping is pure overhead".
+- **`--reset-stats` also deletes `tuned.jsonl`** — stale adaptive state used
+  to keep seeding runs after a reset while `--stats` said "No metrics found".
+- **`100.0%` efficiency is reserved for truly fully-elided output**; 99.97%
+  used to round up to a fabricated perfect score (real dd ratio in the wild).
+  Tampered records with `tokens_saved > tokens_raw` are clamped at ingestion,
+  so the headline, the median, and `--json` agree on corrupt input instead
+  of the text view clamping while the JSON leaked >100%.
+- **Deterministic table order on ties** — the 0-saved rows reshuffled on
+  every invocation (HashMap iteration order leaking through a single-key sort).
+- **`format_tokens`/`format_number` unit boundaries** — 999,950+ rendered as
+  `1000.0k` (7 chars, breaking the 6-wide cells); units now promote at the
+  rounding boundary, with a `G` tier keeping the cell within 7 chars up to
+  ~999.9G tokens.
+- **`sh -c` records keep cmd and args on the same layer** — `sh -c "exit 42"`
+  used to record `{"cmd":"exit","args":"-c exit 42"}` (inner cmd, outer
+  args), also keying the learner's bucket on the wrong string. Inner args are
+  now extracted (and secret-redacted) alongside the inner command.
+  *Migration note*: existing `tuned.jsonl` entries and learner history for
+  `sh/bash/zsh -c`-wrapped buckets are keyed on the old string and are
+  abandoned (the TTL prunes them); tuning re-converges in 3-5 runs.
+- **Secrets no longer leak through the `cmd` field.** `l0-cache API_KEY=x
+  deploy` (or `sh -c 'PASSWORD=x deploy'`) recorded the assignment VERBATIM
+  as the command name, bypassing redaction and rendering the secret in the
+  --stats table. Leading `NAME=value` assignments are now skipped when
+  resolving the command and pass through the args-side secret redaction.
+- **`safe_label` no longer underflows on width 0** (debug-build panic guard).
+- **The file lock is `flock(2)` on unix** instead of a mkdir sentinel whose
+  10s mtime-break could steal a live lock and whose rotation window could
+  drop a concurrent append; kernel-released on crash. The flock protocol
+  uses its own `<file>.flock` path so pre-flock binaries keep their mkdir
+  lock working during a mixed-version window (no per-run stall), and
+  `--reset-stats` cleans up lock artifacts. Non-unix keeps the mkdir
+  fallback; `--doctor` probes the protocol actually in use.
+- **`tuned.jsonl` is compacted on write** (latest entry per bucket, atomic
+  temp+rename with a unique temp name) — it was append-only, one line per
+  firing, contradicting its own "one line per bucket" doc comment. When the
+  lock is unavailable or the file is unreadable, the writer falls back to a
+  plain append of its own entry instead of rewriting the whole file from a
+  bad snapshot (which could silently drop other buckets' tunes). Compaction
+  is destructive for unparseable lines and expired/garbage-timestamp
+  entries: they are pruned, not carried forward.
+
+### Added
+- **`recover_defaults` rule — the un-ratchet.** Every other rule only moves
+  head/tail down and `tail_error` up, compounding forever. After 5
+  consecutive clean (success, non-truncated) runs, a bucket seeded by a
+  truncation-driven decay is restored to its configured base, and an
+  expanded `tail_error` returns to base once failures stop.
+  `proactive_shrink` tunes are deliberately not recovered — a clean streak
+  is exactly their supporting evidence (no flip-flop); every other seed
+  (including a tag overwritten by a later expand or a partial recovery)
+  remains recoverable, so a bucket can never get stuck below base until the
+  TTL. Rendered in the breakdown, the mix (`R:`), and `--json`
+  (`recover_defaults`).
+- **30-day TTL on persisted tunes** — `lookup_tuned` ignores (and compaction
+  prunes) entries older than the metrics housekeeping window, so a tune from
+  a long-gone workload can't seed today's runs. Timestamps more than a day
+  in the future count as expired too (a corrupted far-future entry would
+  otherwise be immortal), and the TTL is applied during the scan so a
+  garbage later line can't mask a fresh entry.
+- **`L0_CACHE_NO_TELEMETRY=1`** skips all `metrics.jsonl`/`tuned.jsonl`
+  writes — belt-and-braces for test harnesses and benchmark scripts.
+- **`Median/run` headline row** (unweighted median per-run efficiency) next
+  to the token-weighted gauge, and a **dominance disclosure** ("`cmd`
+  accounts for N% of savings") whenever one command holds >50% — one dd
+  benchmark made a 77%-real-world day read as 98.3%.
+- **The IMPACT bar is a real second axis**: filled by the command's share of
+  total tokens saved (sqrt-scaled so small rows stay visible), colored by
+  efficiency. It used to re-plot the same percentage as the EFFIC. column.
+- **Legend for the auto-tuning mix** (`E=expand Dm/Ds/Dsy=decay P=shrink
+  R=recover`), a `last <date>` annotation on the `noisy ⚠` counter (stale
+  pre-fix history vs. live problem), and a `noisy_last_seen` JSON field.
+- **`est. tokens` unit label** on the Saved row, **`↑ most saved`** replaces
+  the ambiguous `↑ best` (and `⚠ low` now wins over it on row 0), and a dim
+  **`(n<5)`** qualifier explains red rows that escape the ⚠ only because of
+  the 5-run sample gate.
+- **Terminal-aware layout**: the box grows with the terminal (COMMAND column
+  absorbs the width, 10→24 cols) and visible-width math accounts for
+  double-width (CJK) characters end-to-end — name cells pad and truncate by
+  display columns, not chars. Red now starts below the 10% hint threshold so
+  row color and `⚠` agree (one shared constant).
+- **Rendering is unit-testable**: `--stats` builds a string
+  (`render_stats_text`) instead of printing line-by-line; 10 new rendering
+  tests cover the 100% boundary, markers, footers, dominance, legend, and
+  wide-terminal behavior; hook skip-lists gain the zero-output builtins
+  (`exit`, `true`, `false`, `:`, `wait`, `trap`).
+
 ## [0.1.10] - 2026-06-10
 
 Self-learning audit + iterative fixes. `--stats` gains an `AUTO-TUNING` section

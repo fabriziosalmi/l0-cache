@@ -44,15 +44,34 @@ fn main() {
         std::process::exit(0);
     }
 
+    // ── Validate --since up front (any mode) ────────────────────────────
+    // An unparseable window must be an error, not silently-ignored: the old
+    // behavior rendered all-time data under a header claiming the window —
+    // and in run mode the bad value was swallowed without a sound. Trimmed
+    // here so a stray trailing space can't leak into the dashboard header.
+    let since = args.since.as_deref().map(str::trim);
+    if let Some(s) = since {
+        if !telemetry::since_is_valid(s) {
+            eprintln!(
+                "l0-cache: error: invalid --since value '{}' (expected <num><unit> with unit one of d/h/m/s, e.g. 7d, 24h, 30m)",
+                s
+            );
+            std::process::exit(2);
+        }
+        if !args.stats && !args.discover {
+            eprintln!("l0-cache: warning: --since has no effect without --stats or --discover");
+        }
+    }
+
     // ── Stats mode ──────────────────────────────────────────────────────
     if args.stats {
-        telemetry::print_stats(args.since.as_deref(), args.json, args.cost_per_mtok);
+        telemetry::print_stats(since, args.json, args.cost_per_mtok);
         std::process::exit(0);
     }
 
     // ── Discover mode (optimization advisory) ───────────────────────────
     if args.discover {
-        telemetry::run_discover(args.since.as_deref(), args.cost_per_mtok);
+        telemetry::run_discover(since, args.cost_per_mtok);
         std::process::exit(0);
     }
 
@@ -68,6 +87,23 @@ fn main() {
         eprintln!("   l0-cache --stats       show token savings report");
         eprintln!("   l0-cache --help        show all options");
         std::process::exit(1);
+    }
+
+    // ── Unknown leading flag ────────────────────────────────────────────
+    // `trailing_var_arg + allow_hyphen_values` means clap hands us any
+    // unrecognized `--flag` as command[0]. Running it would silently fail
+    // (`sh -c "--flag …"` exits 2 with the shell's error on its own, nulled,
+    // stderr) and pollute telemetry with a flag-named command. Reject it
+    // here, before the guard and before any metric is written.
+    if let Some(first) = args.command.first() {
+        if first.starts_with('-') {
+            eprintln!(
+                "l0-cache: error: unrecognized option '{}' (commands cannot start with '-')",
+                first
+            );
+            eprintln!("   l0-cache --help        show all options");
+            std::process::exit(2);
+        }
     }
 
     // ── Safety Command Guard ────────────────────────────────────────────
@@ -140,15 +176,24 @@ fn main() {
     let args_str = args.cmd_args_string();
     let bucket_key = telemetry::args_hash(&args_str);
     if !args.no_auto {
+        // The pre-seed resolution is the recovery rule's restore target —
+        // captured BEFORE the persisted tune overwrites head/tail/tail_error.
+        let base = telemetry::BaseParams {
+            head,
+            tail,
+            tail_error,
+        };
         // Step 5 — seed from persisted tune. If this bucket has been tuned
         // before, the learner runs against THOSE values, not the CLI defaults.
         // This is what makes the decay/shrink rules COMPOUND across runs
         // ("apprendimento incrementale") instead of resetting every time.
         // Floored values are still bounded by auto_floor / auto_ceiling.
+        let mut seeded_by: Option<String> = None;
         if let Some(prior) = telemetry::lookup_tuned(&args.cmd_name(), &bucket_key) {
             head = prior.head;
             tail = prior.tail;
             tail_error = prior.tail_error;
+            seeded_by = Some(prior.event);
         }
         let tuned = telemetry::get_adaptive_params(
             &args.cmd_name(),
@@ -156,6 +201,8 @@ fn main() {
             head,
             tail,
             tail_error,
+            base,
+            seeded_by.as_deref(),
             args.auto_floor,
             args.auto_ceiling,
         );

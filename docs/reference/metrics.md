@@ -24,7 +24,7 @@ One JSON object per line (JSONL). Each line represents one `l0-cache` invocation
   "strategy": "head_tail",
   "exit_code": 0,
   "duration_ms": 1234,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "adaptive_event": "decay_moderate",
   "args_hash": "a1b2c3d4"
 }
@@ -71,6 +71,21 @@ When `adaptive_event` is present, it carries one of:
 | `decay_strong` | 5+ consecutive truncated successes → 40% head/tail shrink |
 | `decay_steady` | ≥80% of last 20 bucket records were truncated successes → 30% shrink |
 | `proactive_shrink` | ≥20 clean (success + not truncated) records, `max(lines_raw) + 5` fits in half the current budget → shrink to `max + 5` |
+| `recover_defaults` | Un-ratchet: 5 consecutive clean runs restore the configured base — head/tail when the seeding tune was a truncation-driven decay, and/or a `tail_error` expanded above base. `proactive_shrink` tunes are not recovered (a clean streak confirms them) |
+
+An event tag is only written when the rule actually **changed** the
+parameters: a trigger whose result was pinned at the floor/ceiling is not
+recorded (pre-0.1.11 versions wrote one no-op event per run for floor-pinned
+buckets, inflating the `--stats` firing counts ~13×).
+
+Persisted tunes (`tuned.jsonl`) are compacted on write to one line per
+`(cmd, args_hash)` bucket and expire after 30 days; `--stats --json` exposes
+`median_run_efficiency_pct` and `auto_tuning.noisy_last_seen` alongside the
+counters.
+
+In the `Top cmds` panel of `--stats`, the per-command mix abbreviations map as
+`E`=`expand_tail_err`, `Dm`=`decay_moderate`, `Ds`=`decay_strong`,
+`Dsy`=`decay_steady`, `P`=`proactive_shrink`, `R`=`recover_defaults`.
 
 See the [Adaptive auto-tuning section](../guide/configuration.md#parameter-auto-tuning-enabled-by-default)
 of the configuration guide for the full rule semantics.
@@ -95,8 +110,10 @@ reasonable approximation for English text with common LLM tokenizers
 ## Persistence sidecar (`tuned.jsonl`)
 
 Alongside `metrics.jsonl`, the adaptive learner reads and writes
-`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per firing, keyed by
-`(cmd, args_hash)`. Schema:
+`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per `(cmd, args_hash)`
+bucket: the file is compacted on every write (latest entry per bucket;
+entries past the 30-day TTL, or with unparseable timestamps, are pruned).
+Schema:
 
 ```json
 {
@@ -111,7 +128,9 @@ Alongside `metrics.jsonl`, the adaptive learner reads and writes
 ```
 
 The learner does a last-write-wins lookup for the current bucket on every
-run and seeds the rule with those values instead of the CLI defaults — that
-makes the decay/shrink rules compound across runs. Delete this file to
-reset all learned tunes. Best-effort I/O; a missing or corrupt file is
-silently treated as "no prior tune".
+run (entries past the 30-day TTL no longer seed) and starts the rules from
+those values instead of the CLI defaults — that makes the decay/shrink
+rules compound across runs, with `recover_defaults` as the way back.
+`--reset-stats` deletes this file along with the metrics (or delete it by
+hand). Best-effort I/O; a missing or corrupt file is silently treated as
+"no prior tune".

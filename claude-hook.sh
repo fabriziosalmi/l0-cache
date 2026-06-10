@@ -83,6 +83,7 @@ case "$cmd" in
   *'&&'* | *'||'* | *';'* | *'|'* | *'>'* | *'<'* | *'`'* | *'$('* | *'&'*) exit 0 ;;
   *$'\n'*) exit 0 ;;
   cd | cd\ * | export\ * | source\ * | .\ * | eval\ * | exec\ * | set\ * | unset\ * | alias\ *) exit 0 ;;
+  exit | exit\ * | true | true\ * | false | false\ * | : | :\ * | wait | wait\ * | trap\ *) exit 0 ;;
   for\ * | while\ * | until\ * | if\ * | case\ * | function\ * | '{'* | '('*) exit 0 ;;
 esac
 
