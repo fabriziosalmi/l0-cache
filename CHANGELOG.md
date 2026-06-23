@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Clean-success squelch.** On a zero exit with no error/warning signal
+  anywhere in the stream, the displayed tail is trimmed to half (floored at 5
+  lines) — a clean build/test/install's middle is progress noise. The head
+  (command echo) is always kept and the final summary line always survives.
+  Any `error`/`warn`/`fail`/`exception`/`panic`/`traceback`/`fatal` signal, or
+  a non-zero exit, restores the full tail so failures stay completely visible.
+  On by default; disable with `--no-squelch` or `squelch = false` (per-command
+  config). The error-signal keyword set is now shared with the `--only-errors`
+  filter so the two can never disagree.
+
+### Fixed
+- **The truncation banner now reports the *actual* tail shown**, not the
+  configured cap: with the squelch active it reads `30 head + 15 tail`, not a
+  fabricated `30 tail`. The runner reports the rendered `display_tail` so the
+  banner can never overstate what survived.
+
+### Changed
+- **`src/telemetry/mod.rs` split into focused submodules** (`lock`, `paths`,
+  `tuned`, `metric`, `adaptive`, `stats/{agg,render}`, `doctor`, `tests`),
+  reducing a 5313-line file to a 71-line facade. No behaviour change.
+
 ## [0.1.11] - 2026-06-11
 
 Full-findings remediation of the `--stats`/telemetry audit: every confirmed

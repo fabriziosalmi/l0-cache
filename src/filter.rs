@@ -14,6 +14,23 @@ pub const DEFAULT_TAIL_ERROR: usize = 120;
 /// Only truncate if total lines exceed this threshold.
 pub const DEFAULT_THRESHOLD: usize = 100;
 
+/// Clean-success squelch: on a zero exit with no error/warning signal anywhere
+/// in the stream, the displayed tail is trimmed to `tail / DIVISOR` — the middle
+/// of a clean build/test/install is almost always progress noise. The head
+/// (command echo) is left intact and failures are never squelched.
+pub const SUCCESS_SQUELCH_TAIL_DIVISOR: usize = 2;
+/// Never squelch the tail below this many lines: the final summary line(s) of a
+/// clean run (e.g. "Finished in 3.2s", "PASSED") must always survive.
+pub const SUCCESS_SQUELCH_MIN_TAIL: usize = 5;
+
+/// Reduced tail to display for a clean, signal-free success. Never larger than
+/// `tail_cap`, so an explicitly tiny `--tail` is honored rather than expanded.
+pub fn squelched_tail(tail_cap: usize) -> usize {
+    (tail_cap / SUCCESS_SQUELCH_TAIL_DIVISOR)
+        .max(SUCCESS_SQUELCH_MIN_TAIL)
+        .min(tail_cap)
+}
+
 // ── ANSI Strip ──────────────────────────────────────────────────────────────
 
 /// Remove all ANSI escape sequences from a byte slice, returning a String.
@@ -42,6 +59,26 @@ fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
         return false;
     }
     (0..=hb.len() - nb.len()).any(|i| hb[i..i + nb.len()].eq_ignore_ascii_case(nb))
+}
+
+/// Keywords that mark a line as carrying error/warning signal. Shared by the
+/// `--only-errors` filter and the clean-success squelch gate so both agree on
+/// what "this output looks problematic" means.
+const ERROR_SIGNAL_KEYWORDS: [&str; 7] = [
+    "error",
+    "warn",
+    "fail",
+    "exception",
+    "panic",
+    "traceback",
+    "fatal",
+];
+
+/// Whether `line` carries any error/warning signal keyword (case-insensitive).
+pub fn has_error_signal(line: &str) -> bool {
+    ERROR_SIGNAL_KEYWORDS
+        .iter()
+        .any(|kw| contains_ascii_ci(line, kw))
 }
 
 // ── Line Collapse (Identical + Prefix-based) ────────────────────────────────
@@ -551,6 +588,9 @@ pub struct FilterPipeline {
     buffer: HeadTailBuffer,
     only_errors: bool,
     auto_tuned: bool,
+    /// Sticky: set once any error/warning signal is seen in the stream. Gates
+    /// the clean-success squelch so a problematic run keeps its full tail.
+    saw_error_signal: bool,
 }
 
 impl FilterPipeline {
@@ -566,7 +606,14 @@ impl FilterPipeline {
             buffer: HeadTailBuffer::new(head_cap, tail_cap),
             only_errors,
             auto_tuned: false,
+            saw_error_signal: false,
         }
+    }
+
+    /// Whether any error/warning signal appeared in the stream. The clean-success
+    /// squelch consults this: a signal anywhere → keep the full success tail.
+    pub fn saw_error_signal(&self) -> bool {
+        self.saw_error_signal
     }
 
     /// Push one already-diff-processed line through collapse → squeeze → buffer.
@@ -581,23 +628,16 @@ impl FilterPipeline {
     /// Feed a raw line (already ANSI-stripped). Applies collapse + squeeze + buffer.
     /// Uses Cow to avoid cloning through the pipeline.
     pub fn feed(&mut self, line: Cow<'_, str>) {
+        // Track error/warning signal across the WHOLE stream — even lines later
+        // truncated away. The clean-success squelch must back off if anything
+        // problematic appeared, so the agent keeps the full tail to inspect it.
+        if !self.saw_error_signal && has_error_signal(line.as_ref()) {
+            self.saw_error_signal = true;
+        }
+
         // --- 80/20 only_errors Filter ---
-        if self.only_errors {
-            let l = line.as_ref();
-            let is_error = [
-                "error",
-                "warn",
-                "fail",
-                "exception",
-                "panic",
-                "traceback",
-                "fatal",
-            ]
-            .iter()
-            .any(|kw| contains_ascii_ci(l, kw));
-            if !is_error {
-                return;
-            }
+        if self.only_errors && !has_error_signal(line.as_ref()) {
+            return;
         }
 
         // --- 80/20 Auto-Tuning Ecosystem Heuristics ---
@@ -1497,6 +1537,61 @@ mod tests {
             r.lines_raw < 30,
             "context collapsed: lines_raw={}",
             r.lines_raw
+        );
+    }
+
+    // ── Clean-success squelch ───────────────────────────────────────────
+
+    #[test]
+    fn has_error_signal_matches_keywords_case_insensitively() {
+        assert!(has_error_signal("ERROR: boom"));
+        assert!(has_error_signal("a warning here"));
+        assert!(has_error_signal("Build FAILED"));
+        assert!(has_error_signal("thread 'main' panicked at ..."));
+        assert!(has_error_signal("Traceback (most recent call last)"));
+        // Clean progress/summary lines carry no signal.
+        assert!(!has_error_signal("Compiling foo v0.1.0"));
+        assert!(!has_error_signal("Finished in 3.2s"));
+        assert!(!has_error_signal("   125"));
+        assert!(!has_error_signal(""));
+    }
+
+    #[test]
+    fn squelched_tail_halves_floors_and_never_expands() {
+        assert_eq!(squelched_tail(30), 15); // halved
+        assert_eq!(squelched_tail(8), 5); // floored at MIN, not 4
+        assert_eq!(squelched_tail(5), 5); // already at floor
+        assert_eq!(squelched_tail(3), 3); // tiny --tail honored, never expanded
+        assert_eq!(squelched_tail(0), 0); // degenerate: no tail stays no tail
+        assert!(squelched_tail(1000) <= 1000);
+    }
+
+    #[test]
+    fn pipeline_tracks_error_signal_across_whole_stream() {
+        // A signal seen mid-stream sticks even if that line is later truncated away.
+        let mut p = FilterPipeline::new(2, 2, false);
+        for i in 0..50 {
+            if i == 25 {
+                p.feed(Cow::Borrowed("error: transient hiccup"));
+            } else {
+                p.feed(Cow::Owned(format!("clean line {i}")));
+            }
+        }
+        assert!(
+            p.saw_error_signal(),
+            "a mid-stream error keyword must trip the sticky flag"
+        );
+    }
+
+    #[test]
+    fn pipeline_no_error_signal_on_clean_stream() {
+        let mut p = FilterPipeline::new(2, 2, false);
+        for i in 0..50 {
+            p.feed(Cow::Owned(format!("Compiling crate-{i}")));
+        }
+        assert!(
+            !p.saw_error_signal(),
+            "a fully clean stream must leave the squelch gate open"
         );
     }
 }

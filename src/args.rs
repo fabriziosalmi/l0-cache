@@ -79,6 +79,11 @@ pub struct Args {
     #[arg(long)]
     pub only_errors: bool,
 
+    /// Disable the clean-success squelch (the tighter tail used on a zero exit
+    /// with no error/warning signal). Failures are never squelched regardless.
+    #[arg(long)]
+    pub no_squelch: bool,
+
     /// On a failing command whose output was truncated, save the full output to a
     /// temp file and point to it in the banner (so the agent can read the omitted
     /// lines without re-running). Off by default.

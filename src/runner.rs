@@ -36,6 +36,10 @@ pub struct RunResult {
     /// Path to the saved full-output recovery file, when one was kept (only on a
     /// failing + truncated run with `--recover`). `None` otherwise.
     pub recovery_path: Option<PathBuf>,
+    /// The actual number of tail lines shown — after the success-vs-error choice
+    /// AND the clean-success squelch — so the banner reports the truth, not the
+    /// configured cap. `0` in raw mode (which has no head/tail banner).
+    pub display_tail: usize,
 }
 
 /// Maximum length of a single line before we force-truncate (1MB).
@@ -289,6 +293,7 @@ pub fn run_captured(
     threshold: usize,
     raw_mode: bool,
     only_errors: bool,
+    squelch: bool,
     idle_timeout: u64,
     recover: bool,
 ) -> std::io::Result<RunResult> {
@@ -464,6 +469,7 @@ pub fn run_captured(
             duration_ms,
             strategy: "binary_skip",
             recovery_path: None,
+            display_tail: 0,
         });
     }
 
@@ -497,13 +503,23 @@ pub fn run_captured(
             duration_ms,
             strategy: "raw",
             recovery_path: None,
+            display_tail: 0,
         })
     } else {
         let pipe = pipeline.unwrap();
         // Show the success tail on exit 0, the (larger) error tail otherwise.
         // The buffer retained `retain_tail` lines, so this trims, never expands.
+        //
+        // Clean-success squelch: on a zero exit with no error/warning signal
+        // anywhere in the stream, trim the success tail further — a clean
+        // build/test/install's middle is progress noise. Any signal (or a
+        // non-zero exit) keeps the full tail so failures stay fully visible.
         let display_tail = if exit_code == 0 {
-            tail_cap
+            if squelch && !pipe.saw_error_signal() {
+                crate::filter::squelched_tail(tail_cap)
+            } else {
+                tail_cap
+            }
         } else {
             tail_error_cap
         };
@@ -526,6 +542,7 @@ pub fn run_captured(
             duration_ms,
             strategy: "head_tail",
             recovery_path,
+            display_tail,
         })
     }
 }
@@ -859,6 +876,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             false,
         )
@@ -870,8 +888,19 @@ mod tests {
 
     #[test]
     fn run_false_returns_nonzero() {
-        let result =
-            run_captured(&["false".into()], 30, 30, 120, 100, false, false, 0, false).unwrap();
+        let result = run_captured(
+            &["false".into()],
+            30,
+            30,
+            120,
+            100,
+            false,
+            false,
+            false,
+            0,
+            false,
+        )
+        .unwrap();
         assert_ne!(result.exit_code, 0);
     }
 
@@ -889,6 +918,7 @@ mod tests {
             30,
             120,
             100,
+            false,
             false,
             false,
             0,
@@ -914,6 +944,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             false,
         )
@@ -933,6 +964,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             false,
         )
@@ -949,6 +981,7 @@ mod tests {
             120,
             100,
             true,
+            false,
             false,
             0,
             false,
@@ -972,6 +1005,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             false,
         )
@@ -991,6 +1025,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             false,
         )
@@ -1000,8 +1035,19 @@ mod tests {
 
     #[test]
     fn run_captured_empty_output() {
-        let result =
-            run_captured(&["true".into()], 30, 30, 120, 100, false, false, 0, false).unwrap();
+        let result = run_captured(
+            &["true".into()],
+            30,
+            30,
+            120,
+            100,
+            false,
+            false,
+            false,
+            0,
+            false,
+        )
+        .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.filter_result.output.trim().is_empty());
     }
@@ -1014,6 +1060,7 @@ mod tests {
             30,
             120,
             100,
+            false,
             false,
             false,
             0,
@@ -1045,6 +1092,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             false,
         )
@@ -1064,6 +1112,7 @@ mod tests {
             30,
             120,
             100,
+            false,
             false,
             false,
             0,
@@ -1092,6 +1141,7 @@ mod tests {
             100,
             false,
             false,
+            false,
             0,
             true,
         )
@@ -1107,9 +1157,84 @@ mod tests {
     #[test]
     fn recover_absent_when_not_truncated() {
         // `false` → fails with no output → nothing was truncated → nothing to recover.
-        let result =
-            run_captured(&["false".into()], 30, 30, 120, 100, false, false, 0, true).unwrap();
+        let result = run_captured(
+            &["false".into()],
+            30,
+            30,
+            120,
+            100,
+            false,
+            false,
+            false,
+            0,
+            true,
+        )
+        .unwrap();
         assert_ne!(result.exit_code, 0);
         assert!(result.recovery_path.is_none());
+    }
+
+    // ── clean-success squelch tests ────────────────────────────────────
+    // Distinct argv[0] per test → distinct recovery temp filenames (unused
+    // here since recover=false, but keeps the pattern consistent).
+
+    #[test]
+    fn squelch_trims_clean_success_tail() {
+        let args = ["seq".to_string(), "1".into(), "500".into()];
+        // Clean exit 0, no error signal → squelch trims the success tail.
+        let squelched =
+            run_captured(&args, 30, 30, 120, 100, false, false, true, 0, false).unwrap();
+        // Same command, squelch off → full success tail (legacy behavior).
+        let full = run_captured(&args, 30, 30, 120, 100, false, false, false, 0, false).unwrap();
+        assert_eq!(squelched.exit_code, 0);
+        assert!(squelched.filter_result.truncated);
+        assert!(
+            squelched.filter_result.output.lines().count()
+                < full.filter_result.output.lines().count(),
+            "squelch should keep fewer tail lines on a clean success: squelched={}, full={}",
+            squelched.filter_result.output.lines().count(),
+            full.filter_result.output.lines().count(),
+        );
+        // The final summary line must always survive the squelch.
+        assert!(
+            squelched.filter_result.output.contains("500"),
+            "the last line (500) must survive the squelched tail"
+        );
+    }
+
+    #[test]
+    fn squelch_backs_off_on_error_signal() {
+        // exit 0, but a warning is printed → the squelch must NOT trim.
+        let warn_args = [
+            "sh".to_string(),
+            "-c".into(),
+            "echo 'warning: heads up'; seq 1 500".into(),
+        ];
+        let with_warn =
+            run_captured(&warn_args, 30, 30, 120, 100, false, false, true, 0, false).unwrap();
+        let clean_args = ["seq".to_string(), "1".into(), "500".into()];
+        let clean =
+            run_captured(&clean_args, 30, 30, 120, 100, false, false, true, 0, false).unwrap();
+        assert_eq!(with_warn.exit_code, 0);
+        assert!(
+            with_warn.filter_result.output.lines().count()
+                > clean.filter_result.output.lines().count(),
+            "an error/warning signal must restore the full success tail"
+        );
+    }
+
+    #[test]
+    fn squelch_never_touches_failures() {
+        // Failing command: output is identical with squelch on vs off — failures
+        // always use the full error tail and are never squelched.
+        let args = ["sh".to_string(), "-c".into(), "seq 1 500; exit 1".into()];
+        let on = run_captured(&args, 30, 30, 120, 100, false, false, true, 0, false).unwrap();
+        let off = run_captured(&args, 30, 30, 120, 100, false, false, false, 0, false).unwrap();
+        assert_ne!(on.exit_code, 0);
+        assert_eq!(
+            on.filter_result.output.lines().count(),
+            off.filter_result.output.lines().count(),
+            "squelch must not change failing-command output"
+        );
     }
 }

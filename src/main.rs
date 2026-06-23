@@ -166,6 +166,9 @@ fn main() {
     // Booleans: an explicit CLI flag or the config can turn these on.
     let only_errors = args.only_errors || ov.only_errors.unwrap_or(false);
     let recover = args.recover || ov.recover.unwrap_or(false);
+    // Clean-success squelch is on by default; `--no-squelch` or `squelch = false`
+    // (CLI wins over config) turns it off for callers who want a fixed tail.
+    let squelch = !args.no_squelch && ov.squelch.unwrap_or(true);
 
     // Tracks which auto-tuning rule branch fired this run (None if disabled or
     // no rule matched), so the metric written below records it for `--stats`.
@@ -245,6 +248,7 @@ fn main() {
         threshold,
         args.raw,
         only_errors,
+        squelch,
         args.idle_timeout,
         recover,
     ) {
@@ -256,11 +260,10 @@ fn main() {
                 // filter) already states the gap; this footer adds only run metadata
                 // and the head/tail summary, so the omitted count is not repeated.
                 let head_cap = head;
-                let tail_cap = if result.exit_code == 0 {
-                    tail
-                } else {
-                    tail_error
-                };
+                // The ACTUAL tail shown (success vs error tail, minus any
+                // clean-success squelch) — reported by the runner so the banner
+                // never overstates what survived.
+                let tail_cap = result.display_tail;
                 let separator = if output_to_write.is_empty() || output_to_write.ends_with('\n') {
                     ""
                 } else {

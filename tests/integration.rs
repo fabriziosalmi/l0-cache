@@ -158,11 +158,13 @@ fn test_auto_tuning_success_decay_e2e() {
     temp_dir.push(unique_sub);
     std::fs::create_dir_all(&temp_dir).unwrap();
 
+    // `--no-squelch`: this test asserts the tuned tail CAP in the banner, so the
+    // clean-success squelch must not trim the displayed tail out from under it.
     // Run 1, 2 & 3: Successes (no decay yet because history has 0, 1, 2 successes respectively)
     for _ in 0..3 {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
-            .args(["--auto", "seq", "1", "200"])
+            .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -176,7 +178,7 @@ fn test_auto_tuning_success_decay_e2e() {
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
-            .args(["--auto", "seq", "1", "200"])
+            .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -192,7 +194,7 @@ fn test_auto_tuning_success_decay_e2e() {
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
-            .args(["--auto", "seq", "1", "200"])
+            .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -207,7 +209,7 @@ fn test_auto_tuning_success_decay_e2e() {
     {
         let output = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &temp_dir)
-            .args(["--auto", "seq", "1", "200"])
+            .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
         let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -400,6 +402,51 @@ fn tail_error_shows_more_tail_than_success() {
         "success tail should be small (line 400 should not appear)"
     );
     assert!(ok_out.lines().any(|l| l == "500"));
+
+    let _ = std::fs::remove_dir_all(&xdg);
+}
+
+#[test]
+fn clean_success_squelch_trims_tail_and_no_squelch_opts_out() {
+    // Default: a clean exit-0 run squelches the success tail (15 lines) so the
+    // mid-tail (line 480) is dropped; `--no-squelch` restores the full 30-line
+    // tail where line 480 reappears. The last line (500) survives either way.
+    let t = get_t_bin();
+    let xdg = temp_xdg("squelch");
+
+    let default_run = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--no-auto", "sh", "-c", "seq 1 500; exit 0"])
+        .output()
+        .unwrap();
+    let default_out = String::from_utf8_lossy(&default_run.stdout);
+    assert!(
+        !default_out.lines().any(|l| l == "480"),
+        "squelched success tail (15) should not reach line 480"
+    );
+    assert!(default_out.lines().any(|l| l == "500"), "summary survives");
+    // The banner must report the ACTUAL squelched tail, not the configured cap.
+    assert!(
+        default_out.contains("30 head + 15 tail"),
+        "banner must honestly report the 15-line squelched tail: {default_out}"
+    );
+
+    let no_squelch = Command::new(&t)
+        .env("XDG_DATA_HOME", &xdg)
+        .env("L0_CACHE_GUARD", "0")
+        .args(["--no-auto", "--no-squelch", "sh", "-c", "seq 1 500; exit 0"])
+        .output()
+        .unwrap();
+    let no_squelch_out = String::from_utf8_lossy(&no_squelch.stdout);
+    assert!(
+        no_squelch_out.lines().any(|l| l == "480"),
+        "--no-squelch restores the full 30-line success tail (line 480 present)"
+    );
+    assert!(
+        no_squelch_out.contains("30 head + 30 tail"),
+        "--no-squelch banner reports the full 30-line tail: {no_squelch_out}"
+    );
 
     let _ = std::fs::remove_dir_all(&xdg);
 }
@@ -988,12 +1035,14 @@ fn step5_persistence_compounds_decay_across_runs() {
     let t_bin = get_t_bin();
     let xdg = temp_xdg("step5-compound");
 
+    // `--no-squelch` throughout: the banner assertions check the tuned tail CAP,
+    // which the clean-success squelch would otherwise trim at render time.
     // Run 1-3: build up history (3 truncated successes — below trigger).
     for _ in 0..3 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
             .env("L0_CACHE_GUARD", "0")
-            .args(["--auto", "seq", "1", "200"])
+            .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
     }
@@ -1001,7 +1050,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     let r4 = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
         .env("L0_CACHE_GUARD", "0")
-        .args(["--auto", "seq", "1", "200"])
+        .args(["--auto", "--no-squelch", "seq", "1", "200"])
         .output()
         .unwrap();
     let s4 = String::from_utf8_lossy(&r4.stdout);
@@ -1014,7 +1063,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     let r5 = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
         .env("L0_CACHE_GUARD", "0")
-        .args(["--auto", "seq", "1", "200"])
+        .args(["--auto", "--no-squelch", "seq", "1", "200"])
         .output()
         .unwrap();
     let s5 = String::from_utf8_lossy(&r5.stdout);
@@ -1027,7 +1076,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     let r6 = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
         .env("L0_CACHE_GUARD", "0")
-        .args(["--auto", "seq", "1", "200"])
+        .args(["--auto", "--no-squelch", "seq", "1", "200"])
         .output()
         .unwrap();
     let s6 = String::from_utf8_lossy(&r6.stdout);
@@ -1055,13 +1104,15 @@ fn step5_persistence_bucket_isolation_via_args_hash() {
     let t_bin = get_t_bin();
     let xdg = temp_xdg("step5-iso");
 
+    // `--no-squelch`: assert the tuned tail CAP in the banner without the
+    // clean-success squelch trimming the displayed tail.
     // Drive bucket A through 4 truncated successes → decay_moderate fires
     // once and persists (24, 24).
     for _ in 0..4 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
             .env("L0_CACHE_GUARD", "0")
-            .args(["--auto", "seq", "1", "200"])
+            .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
     }
@@ -1071,7 +1122,7 @@ fn step5_persistence_bucket_isolation_via_args_hash() {
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
         .env("L0_CACHE_GUARD", "0")
-        .args(["--auto", "seq", "1", "300"])
+        .args(["--auto", "--no-squelch", "seq", "1", "300"])
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&out.stdout);

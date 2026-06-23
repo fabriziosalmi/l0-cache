@@ -33,6 +33,8 @@ pub struct Overrides {
     pub threshold: Option<usize>,
     pub only_errors: Option<bool>,
     pub recover: Option<bool>,
+    /// Clean-success squelch (default on). `squelch = false` disables it.
+    pub squelch: Option<bool>,
 }
 
 impl Overrides {
@@ -45,6 +47,7 @@ impl Overrides {
             threshold: other.threshold.or(self.threshold),
             only_errors: other.only_errors.or(self.only_errors),
             recover: other.recover.or(self.recover),
+            squelch: other.squelch.or(self.squelch),
         }
     }
 }
@@ -185,6 +188,7 @@ fn apply_kv(cfg: &mut Config, section: &str, key: &str, val: &str) {
         "threshold" => ov.threshold = as_num.or(ov.threshold),
         "only_errors" => ov.only_errors = as_bool.or(ov.only_errors),
         "recover" => ov.recover = as_bool.or(ov.recover),
+        "squelch" => ov.squelch = as_bool.or(ov.squelch),
         _ => {} // unknown key ignored (forward-compatible)
     }
 }

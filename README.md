@@ -32,11 +32,20 @@ command output
   --> unified-diff context collapsing (keep changes, drop unchanged runs)
   --> blank line squeezing
   --> head/tail buffering (30 + 30 lines)
+  --> clean-success squelch (exit 0 + no error signal: trim the tail further)
   --> metrics logging
   --> filtered output
 ```
 
 Typical savings: 50-80% fewer tokens per command invocation.
+
+**Clean-success squelch:** on a zero exit with no error/warning signal anywhere
+in the output, the tail window is trimmed further — a clean build/test/install's
+middle is almost always progress noise, and the agent rarely needs 30 tail lines
+to confirm success. The head (command echo) is always kept, the summary line
+always survives, and the moment any `error`/`warn`/`fail`/`panic`/… signal
+appears — or the command exits non-zero — the full tail is restored. Disable
+with `--no-squelch` or `squelch = false` in config.
 
 ## How it compares
 
