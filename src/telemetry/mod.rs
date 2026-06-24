@@ -36,10 +36,10 @@ pub fn rfc3339_now_for_pub() -> String {
 /// ignored, rendering ALL-TIME data under a header that claimed the window
 /// (e.g. `--since 7days` → "last 7days" over all-time totals). A leading `+`
 /// is rejected too — `u64::parse` accepts it, but the raw string is echoed
-/// into the dashboard header ("last +3d").
+/// into the dashboard header ("last +3d"). Empty strings are also rejected.
 pub fn since_is_valid(s: &str) -> bool {
     let s = s.trim();
-    !s.starts_with('+') && parse_since(s).is_some()
+    !s.is_empty() && !s.starts_with('+') && parse_since(s).is_some()
 }
 // Safety guard — re-exported so `main` can reach `telemetry::{...}`.
 pub use guard::{check_dangerous_command, guard_enabled};
