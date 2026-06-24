@@ -55,7 +55,7 @@ output order, drained synchronously from the main thread.
 | `args` | `src/args.rs` | CLI argument parsing via clap |
 | `filter` | `src/filter.rs` | ANSI strip, collapse, squeeze, head/tail buffer |
 | `runner` | `src/runner.rs` | Process spawning, line reading, exit code |
-| `telemetry` | `src/telemetry/mod.rs` | JSONL metrics, stats reporting, adaptive learner + `tuned.jsonl` |
+| `telemetry` | `src/telemetry/` | JSONL metrics, stats reporting, adaptive learner + `tuned.jsonl`; split into focused submodules (`metric`, `stats/`, `adaptive`, `tuned`, `doctor`, `lock`, `paths`) behind `mod.rs` |
 | `main` | `src/main.rs` | Orchestration, signal handling, output writing |
 
 ## Execution Modes

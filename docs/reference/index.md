@@ -40,6 +40,14 @@ total output is below this threshold, it is printed in full. Default: 100.
 Keep only lines that look like problems (`error`, `warn`, `fail`, `exception`,
 `panic`, `traceback`, `fatal`). Aggressive; non-matching lines are dropped.
 
+#### `--no-squelch`
+Disable the [clean-success squelch](../guide/configuration.md#clean-success-squelch).
+By default, a zero exit with **no** error/warning signal anywhere in the output
+trims the displayed tail further (halved, floored at 5); this flag keeps the full
+tail on every run. The same error-signal keyword set as `--only-errors` gates the
+squelch, so the two never disagree. Failures are never squelched regardless. Also
+settable per-command as `squelch = false`.
+
 #### `--idle-timeout <N>`
 SIGKILL the command and its whole process group after `N` seconds with no
 output, to break interactive-prompt deadlocks. `0` (default) disables it.

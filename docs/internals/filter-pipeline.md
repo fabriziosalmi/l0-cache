@@ -106,6 +106,20 @@ on a **non-zero exit** the larger error tail (120 lines, configurable) is shown
 so error messages and stack traces are preserved; on success the smaller tail
 (30 lines) is shown.
 
+#### Clean-success squelch
+
+One more render-time gate applies to the success tail. If the exit is zero **and**
+no error/warning signal was seen anywhere in the stream, the tail is trimmed
+further — `squelched_tail(cap)` halves it with a floor of 5 (`30 → 15`, `8 → 5`,
+`≤5` unchanged, never expanded). The error-signal tracking is *sticky* across the
+whole stream (a signal in an evicted middle line still counts), so a single
+`warning:` anywhere backs the squelch off to the full tail, and any non-zero exit
+does the same. The head and the final summary line always survive. The behavior is
+on by default and shares the [`--only-errors`](/reference/#only-errors) keyword set;
+see [Clean-success squelch](/guide/configuration#clean-success-squelch) for the
+user-facing controls. The runner returns the *rendered* tail count so the
+truncation banner reports the truth (`30 head + 15 tail`), not the configured cap.
+
 ### Memory Layout
 
 ```

@@ -24,7 +24,7 @@ One JSON object per line (JSONL). Each line represents one `l0-cache` invocation
   "strategy": "head_tail",
   "exit_code": 0,
   "duration_ms": 1234,
-  "version": "0.1.11",
+  "version": "0.1.12",
   "adaptive_event": "decay_moderate",
   "args_hash": "a1b2c3d4"
 }

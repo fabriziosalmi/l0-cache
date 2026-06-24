@@ -13,6 +13,7 @@ and explicit flags always win.
 | `--tail` | 30 | Lines to keep from the end of output |
 | `--tail-error` | 120 | Tail lines when exit code is non-zero |
 | `--threshold` | 100 | Minimum lines before truncation kicks in |
+| `--no-squelch` | false | Disable the clean-success squelch (keep the full tail on clean exits) |
 | `--no-auto` | false | Disable adaptive parameter auto-tuning |
 | `--auto-floor` | 10 | Safety floor limit under `--auto` |
 | `--auto-ceiling` | 1000 | Max ceiling limit under `--auto` |
@@ -28,6 +29,24 @@ to capture full stack traces on failure.
 
 For **log inspection** (docker logs, journalctl): consider `--head 10 --tail 80`
 to prioritize recent entries.
+
+## Clean-success squelch
+
+On a **zero exit** with **no** error/warning signal anywhere in the stream, the
+displayed tail is trimmed further — halved and floored at 5 lines (`--tail 30`
+shows 15, a tail already ≤ 5 is left untouched, never expanded). The middle of a
+clean build/test/install is almost always progress noise that the agent does not
+need to confirm success. Always preserved: the **head** (command echo) and the
+**final summary line**.
+
+The moment any signal appears — `error`, `warn`, `fail`, `exception`, `panic`,
+`traceback`, `fatal` (the same keyword set as [`--only-errors`](/reference/#only-errors)) —
+**or** the command exits non-zero, the full tail is restored. **Failures are
+never squelched.** The truncation banner reports the *actual* tail rendered (e.g.
+`30 head + 15 tail`), not the configured cap.
+
+On by default. Disable per-run with [`--no-squelch`](/reference/#no-squelch), or
+per-command with `squelch = false` in the [config file](#config-file-optional).
 
 ## Config file (optional)
 
@@ -70,7 +89,7 @@ git:
 ```
 
 - **Tunable keys** (all optional): `head`, `tail`, `tail_error`, `threshold`,
-  `only_errors`, `recover`.
+  `only_errors`, `recover`, `squelch`.
 - A section names a command; **`[defaults]`** (or **`[*]`**) apply to every command,
   and a per-command section layers on top (command wins field-by-field).
 - Commands are matched by **resolved name**, so `sh -c "cargo test"` matches the
