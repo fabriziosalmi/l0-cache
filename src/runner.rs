@@ -387,11 +387,16 @@ pub fn run_captured(
         }
         raw_bytes_total += raw_len;
 
-        // Binary detection on first ~8KB
+        // Binary detection on the first ~8KB. We validate only the NEW line, not
+        // the whole growing chunk: lines split on `\n` (ASCII), so a chunk is
+        // valid UTF-8 iff every line is, and a NUL in the chunk is a NUL in some
+        // line — equivalent to the old whole-chunk re-scan but without its O(n²)
+        // re-validation of the accumulating prefix. `first_chunk` is still
+        // accumulated for the binary-output banner shown later.
         if first_chunk.len() < 8192 {
             first_chunk.extend_from_slice(&line_buf);
             first_chunk.push(b'\n');
-            if filter::looks_binary(&first_chunk) {
+            if filter::looks_binary(&line_buf) {
                 is_binary = true;
                 break;
             }

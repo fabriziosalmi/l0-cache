@@ -19,7 +19,54 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Create the recovery file safely. On Unix the parent dir is forced to a private
+/// `0700` (and rejected if it is a symlink or owned by another user), and the file
+/// is opened `0600` with `O_NOFOLLOW` — so on a shared `/tmp` an attacker can't
+/// pre-plant a symlink at the predictable `recovery-<cmd>-<pid>.log` path to
+/// redirect the write, and the file (un-redacted output that may contain secrets)
+/// isn't world-readable. On non-Unix, Windows temp dirs are already per-user, so
+/// we fall back to the plain create.
+#[cfg(unix)]
+fn create_recovery_file(dir: &Path, path: &Path) -> std::io::Result<File> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    // Reject a hijacked directory; repair our own if an older build left it loose.
+    let md = fs::symlink_metadata(dir)?;
+    if md.file_type().is_symlink() || !md.is_dir() {
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            "recovery dir not a directory",
+        ));
+    }
+    if md.uid() != unsafe { libc::getuid() } {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            "recovery dir owned by another user",
+        ));
+    }
+    if md.mode() & 0o077 != 0 {
+        fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_recovery_file(dir: &Path, path: &Path) -> std::io::Result<File> {
+    fs::create_dir_all(dir)?;
+    File::create(path)
+}
 
 /// Flush the prebuffer to disk early if a few giant lines arrive before the
 /// line-count threshold is crossed (keeps extra memory bounded).
@@ -84,11 +131,7 @@ impl Recovery {
                 return;
             }
         };
-        if fs::create_dir_all(&dir).is_err() {
-            self.failed = true;
-            return;
-        }
-        let file = match File::create(&self.path) {
+        let file = match create_recovery_file(&dir, &self.path) {
             Ok(f) => f,
             Err(_) => {
                 self.failed = true;
@@ -181,6 +224,72 @@ fn recovery_path(cmd_label: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Security: the recovery dir must be private `0700` and the file `0600`, and
+    /// a symlink pre-planted at the (predictable) path must NOT be followed — so a
+    /// shared `/tmp` can't be used to redirect the write or read the secrets it
+    /// may contain.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_file_is_private_and_refuses_symlink() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("l0-rec-sec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("l0-cache");
+        let path = dir.join("recovery-test.log");
+
+        // Happy path: dir 0700, file 0600.
+        let f = create_recovery_file(&dir, &path).expect("create should succeed");
+        drop(f);
+        assert_eq!(
+            fs::symlink_metadata(&dir).unwrap().mode() & 0o777,
+            0o700,
+            "recovery dir must be private"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "recovery file must be private"
+        );
+        fs::remove_file(&path).unwrap();
+
+        // Symlink attack: a symlink at the path must not be followed (O_NOFOLLOW).
+        let victim = base.join("victim.txt");
+        fs::write(&victim, b"IMPORTANT\n").unwrap();
+        symlink(&victim, &path).unwrap();
+        assert!(
+            create_recovery_file(&dir, &path).is_err(),
+            "must refuse to follow a symlink at the recovery path"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "IMPORTANT\n",
+            "victim file must be untouched"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A world-traversable recovery dir left by an older build is tightened to
+    /// `0700` on next use.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_repairs_loose_dir() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("l0-rec-repair-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("l0-cache");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("recovery-x.log");
+        let f = create_recovery_file(&dir, &path).expect("create should succeed");
+        drop(f);
+        assert_eq!(
+            fs::symlink_metadata(&dir).unwrap().mode() & 0o777,
+            0o700,
+            "a loose dir must be tightened to 0700"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn inactive_never_touches_disk() {

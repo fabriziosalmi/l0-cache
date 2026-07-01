@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Hardening / security / performance pass (three parallel audits, findings
+verified against the code before fixing).
+
+### Fixed
+- **Crash on multibyte output (core-invariant violation).** `skip_timestamp`
+  sliced arbitrary child output at fixed byte offsets (`&s[0..3]`, `&s[15..]`);
+  a `€`/emoji/CJK char straddling offset 3 or 15 panicked, **aborting the
+  wrapper and swallowing the child's real exit code** (verified: `exit 7`
+  surfaced as `101`). Now char-boundary-safe via `get(..)`, so ordinary
+  accented/emoji log lines can never crash the wrapper. Regression test added.
+- **Recovery temp file hardened against a shared-`/tmp` symlink attack.** The
+  `--recover` file lived at a predictable `$TMPDIR/l0-cache/recovery-<cmd>-<pid>.log`
+  created with `File::create` (follows symlinks, default perms) — on a multi-user
+  host an attacker could pre-plant a symlink to clobber a victim's file, and the
+  un-redacted output (possibly secrets) was world-readable. Now the dir is a
+  private `0700` (rejected if it's a symlink or another user's), and the file is
+  opened `0600` with `O_NOFOLLOW`. Unix-only hardening; Windows temp is per-user.
+
+### Performance (hot path — runs per output line on every filtered run)
+- **`has_error_signal` computed once per line, not up to 14×.** `feed()` scanned
+  each line against the 7-keyword set for the sticky-signal flag, again for
+  `--only-errors`, and ran 2–3 more full-line phrase scans for auto-tune on
+  *every clean line*. All consumers now share a single computed boolean (the
+  auto-tune phrases are a subset of the keyword set, so gating them on it is
+  exact).
+- **Fuzzy line-collapse no longer allocates two `String`s per line.** The
+  adjacent-line "fuzzy signature" comparison (the common non-matching case) now
+  iterates both char streams in lockstep with zero allocation.
+- **Binary detection no longer re-validates the growing 8 KB prefix per line**
+  (was O(n²)); it validates only the new line, which is equivalent since lines
+  split on ASCII `\n`.
+
+### Notes
+- Audited and confirmed correct (no change needed): `shell_escape`, secret
+  redaction, ANSI/terminal sanitization (`safe_label`/`strip_ansi`), the `libc`
+  `unsafe` blocks, file-lock/TOCTOU in the user's own data dir, and integer/
+  memory bounds (`saturating_sub`, line/byte caps).
+
 ## [0.1.14] - 2026-07-01
 
 ### Added

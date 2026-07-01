@@ -89,9 +89,11 @@ const MIN_PREFIX_LEN: usize = 2;
 fn skip_timestamp(line: &str) -> &str {
     let s = line.trim_start();
 
-    // Check syslog: "Oct 12 10:30:00 " (16 chars)
-    if s.len() >= 15 {
-        let month = &s[0..3];
+    // Check syslog: "Oct 12 10:30:00 " (16 chars). Use `get(..)` everywhere so a
+    // multibyte char straddling a fixed byte offset (arbitrary child output can
+    // put a `€`/emoji at offset 3 or 15) can never panic — it just fails the
+    // match and we fall through to returning the line unchanged.
+    if let Some(month) = s.get(0..3) {
         let is_month = matches!(
             month,
             "Jan"
@@ -111,7 +113,9 @@ fn skip_timestamp(line: &str) -> &str {
             let bytes = s.as_bytes();
             // simple check for time colon: e.g. "Oct 12 10:30:00" -> bytes[12] or bytes[13] == ':'
             if bytes.len() > 14 && (bytes[12] == b':' || bytes[13] == b':') {
-                return s[15..].trim_start();
+                if let Some(rest) = s.get(15..) {
+                    return rest.trim_start();
+                }
             }
         }
     }
@@ -159,6 +163,29 @@ fn prefix_with_indent(line: &str) -> Option<&str> {
     let word = line.split_whitespace().next()?;
     let idx = line.find(word)?;
     Some(&line[..idx + word.len()])
+}
+
+/// True if `a` and `b` share the same "fuzzy signature": the alphabetic letters
+/// among their first 40 chars are identical and total at least 10 bytes. Computed
+/// by iterating both char streams in lockstep with NO allocation — the previous
+/// version collected a `String` from each line on every adjacent-line comparison
+/// (two heap allocations per non-matching pair, the common case on large output).
+fn same_fuzzy_signature(a: &str, b: &str) -> bool {
+    let mut sa = a.chars().take(40).filter(|c| c.is_alphabetic());
+    let mut sb = b.chars().take(40).filter(|c| c.is_alphabetic());
+    let mut matched_bytes = 0usize;
+    loop {
+        match (sa.next(), sb.next()) {
+            (Some(ca), Some(cb)) => {
+                if ca != cb {
+                    return false;
+                }
+                matched_bytes += ca.len_utf8();
+            }
+            (None, None) => return matched_bytes >= 10, // equal length AND long enough
+            _ => return false,                          // signatures differ in length
+        }
+    }
 }
 
 /// Two-mode collapser for consecutive similar lines:
@@ -241,20 +268,11 @@ impl CollapseLines {
         }
 
         // --- 80/20 Fuzzy Line Collapse ---
-        // If the first word differs (e.g. dynamic hashes or IDs at the start),
-        // we extract the first 40 characters, keep ONLY alphabetic letters, and compare.
-        // This instantly deduplicates lines like:
-        // "[info] 123 processing" vs "[info] 456 processing" -> "infoprocessing"
-        let extract_fuzzy = |s: &str| {
-            s.chars()
-                .take(40)
-                .filter(|c| c.is_alphabetic())
-                .collect::<String>()
-        };
-
-        let fa = extract_fuzzy(a);
-        let fb = extract_fuzzy(b);
-        fa.len() >= 10 && fa == fb
+        // If the first word differs (e.g. dynamic hashes or IDs at the start), we
+        // compare the alphabetic letters among the first 40 chars, requiring ≥10
+        // matching bytes. This deduplicates lines like
+        // "[info] 123 processing" vs "[info] 456 processing" -> "infoprocessing".
+        same_fuzzy_signature(a, b)
     }
 
     fn emit_pending(&mut self) -> Option<String> {
@@ -628,23 +646,37 @@ impl FilterPipeline {
     /// Feed a raw line (already ANSI-stripped). Applies collapse + squeeze + buffer.
     /// Uses Cow to avoid cloning through the pipeline.
     pub fn feed(&mut self, line: Cow<'_, str>) {
+        // Compute the error/warning signal AT MOST ONCE per line and reuse it for
+        // all three consumers below (sticky flag, `only_errors` gate, auto-tune
+        // prefilter). `has_error_signal` scans the line against 7 keywords, so the
+        // old code paid up to 14 full-line passes plus the auto-tune phrase scans
+        // on every clean line; this pays one. We only skip the scan when nothing
+        // still needs it (signal already seen, not filtering, already tuned).
+        let sig = if !self.saw_error_signal || self.only_errors || !self.auto_tuned {
+            has_error_signal(line.as_ref())
+        } else {
+            false
+        };
+
         // Track error/warning signal across the WHOLE stream — even lines later
         // truncated away. The clean-success squelch must back off if anything
         // problematic appeared, so the agent keeps the full tail to inspect it.
-        if !self.saw_error_signal && has_error_signal(line.as_ref()) {
+        if sig {
             self.saw_error_signal = true;
         }
 
         // --- 80/20 only_errors Filter ---
-        if self.only_errors && !has_error_signal(line.as_ref()) {
+        if self.only_errors && !sig {
             return;
         }
 
         // --- 80/20 Auto-Tuning Ecosystem Heuristics ---
         // When a crash signature appears, reshape the head/tail split retroactively.
         // The tail is already sized to retain a large error window (see runner),
-        // so we only need to decide how much HEAD to keep.
-        if !self.auto_tuned {
+        // so we only need to decide how much HEAD to keep. Each signature phrase
+        // contains an error keyword, so it can only appear when `sig` is set —
+        // gating on `sig` skips the phrase scans entirely on clean lines.
+        if !self.auto_tuned && sig {
             let l = line.as_ref();
             if contains_ascii_ci(l, "traceback (most recent call last)")
                 || contains_ascii_ci(l, "panicked at")
@@ -738,6 +770,49 @@ pub fn looks_binary(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: arbitrary child output with a multibyte char straddling the
+    /// fixed byte offsets in `skip_timestamp` (3 and 15) used to panic on a
+    /// non-char-boundary slice, aborting the wrapper and swallowing the child's
+    /// exit code. It must now be boundary-safe (no panic) and still skip real
+    /// timestamps.
+    #[test]
+    fn skip_timestamp_is_char_boundary_safe() {
+        for line in [
+            "aa€xxxxxxxxxxxx AAA",           // € spans bytes 2..5 (offset 3 inside)
+            "Oct 12 10:30:0€ AAA",           // € lands on the syslog skip offset 15
+            "日本語ですねとても長いよ TAIL", // multibyte throughout
+            "€",
+            "Jan 01 00:00:0€",
+            "Dec 31 23:59:5\u{1F600} tail", // emoji (4 bytes) at the offset
+        ] {
+            let _ = skip_timestamp(line); // must not panic
+            let _ = first_word(line);
+        }
+        // Genuine timestamps are still stripped.
+        assert_eq!(skip_timestamp("Oct 12 10:30:00 hello world"), "hello world");
+        assert_eq!(skip_timestamp("2024-10-12T10:30:00Z payload"), "payload");
+        assert_eq!(skip_timestamp("plain line no ts"), "plain line no ts");
+    }
+
+    /// The non-allocating fuzzy signature must match the old collect-into-String
+    /// semantics: equal alphabetic letters among the first 40 chars, ≥10 bytes.
+    #[test]
+    fn same_fuzzy_signature_semantics() {
+        assert!(same_fuzzy_signature(
+            "[info] 123 processing data",
+            "[info] 456 processing data"
+        ));
+        assert!(!same_fuzzy_signature("abc", "abc")); // <10 alphabetic bytes
+        assert!(!same_fuzzy_signature(
+            "hello world alpha",
+            "hello world bravo"
+        )); // differ within the window
+        assert!(same_fuzzy_signature(
+            "processing widget 1 now",
+            "processing widget 2 now"
+        ));
+    }
 
     // ── ANSI strip tests ────────────────────────────────────────────────
 
