@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Adversarial guard sandbox (161-case regression net).** A decision-level test
+  (`sandbox_rm_rf_in_100_ways_is_always_blocked`) throws 161 destructive
+  `rm -rf` spellings — every flag form × system root, path decorations, all HOME
+  spellings, and `bash -c`/`sh -c` wrappers with chaining and quote-insertion —
+  at the guard and asserts each is refused, plus a benign control set that must
+  NOT be blocked. It calls only the guard's decision function, so it can never
+  run a real `rm`. A companion test pins the known, documented lint limits.
+
+### Fixed
+- **Guard hardened against five obfuscation classes** the sandbox surfaced, each
+  of which previously let a real `rm -rf` through:
+  - **`..` traversal** — `rm -rf /etc/../etc`, `/etc/..`, `~/../alice` are now
+    lexically resolved before matching (`/etc/../etc` → `/etc`).
+  - **Home parents** — `rm -rf /home` and `rm -rf /Users` (which wipe *every*
+    account at once) are now protected, incl. the Windows `C:\Users` / `/c/Users`
+    spellings.
+  - **Nested `sh -c`** — `bash -c "bash -c 'rm -rf /etc'"` is now unwrapped
+    recursively (bounded depth).
+  - **Wrapper / env prefixes** — `env rm -rf /etc`, `sudo rm -rf /root`, and
+    `FOO=1 rm -rf /etc` are classified by their effective command.
+  - **`~user`** — another account's home (`rm -rf ~root`) is now blocked.
+
+### Notes
+- Residual limits are unchanged in spirit and now documented explicitly: a
+  static lint still cannot resolve command substitution / `eval`, glob
+  expansion, targets arriving via stdin (`… | xargs rm -rf`), other destructive
+  tools (`find -delete`, `dd`, `shred`), or symlinked aliases. The guard is a
+  seatbelt against accidents, **not** a security boundary; `--no-guard` /
+  `L0_CACHE_GUARD=0` still opt out.
+
 ## [0.1.13] - 2026-07-01
 
 ### Fixed

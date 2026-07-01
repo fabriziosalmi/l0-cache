@@ -1050,6 +1050,308 @@ fn guard_blocks_destructive_line_buried_in_benign_script() {
     );
 }
 
+// ── Adversarial sandbox: "rm -rf in 100 ways" ────────────────────────────
+//
+// A DECISION-LEVEL banco di prova: it calls only the guard's decision function
+// (`check_dangerous_command_with_homes`) — it never spawns a process and never
+// runs a real `rm`, so it cannot delete anything even if the guard has a hole.
+// It throws ~100+ destructive `rm -rf` spellings at the guard and asserts each
+// is refused, collecting EVERY miss into one report instead of stopping at the
+// first. A parallel benign set guards against false positives.
+
+/// argv builder for a case.
+fn av(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|s| s.to_string()).collect()
+}
+
+/// The guard's verdict for a case, keyed on the basename of argv[0] like `main`.
+fn guard_blocks(argv: &[&str], homes: &[String]) -> bool {
+    let name = argv
+        .first()
+        .map(|s| s.rsplit('/').next().unwrap_or(s))
+        .unwrap_or("");
+    check_dangerous_command_with_homes(name, &av(argv), homes).is_err()
+}
+
+#[test]
+fn sandbox_rm_rf_in_100_ways_is_always_blocked() {
+    // Simulated per-OS homes so `$HOME`/resolved-home spellings resolve.
+    let homes: Vec<String> = ["/home/alice", "/Users/alice", r"C:\Users\alice"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Cases that MUST be blocked. (label, argv-after-nothing) — argv[0] is the
+    // binary, the rest are its args exactly as they'd reach l0-cache.
+    let mut block: Vec<(String, Vec<String>)> = Vec::new();
+
+    // 1) Flag-form × system-root sweep (order-independent -r + -f detection).
+    let roots = [
+        "/", "/etc", "/usr", "/var", "/root", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/dev",
+        "/sys", "/proc",
+    ];
+    let flag_forms: &[&[&str]] = &[
+        &["-rf"],
+        &["-fr"],
+        &["-Rf"],
+        &["-rfv"],
+        &["-r", "-f"],
+        &["-f", "-r"],
+        &["--recursive", "--force"],
+        &["-r", "--force"],
+    ];
+    for root in roots {
+        for ff in flag_forms {
+            let mut argv = vec!["rm"];
+            argv.extend_from_slice(ff);
+            argv.push(root);
+            block.push((format!("rm {} {root}", ff.join(" ")), av(&argv)));
+        }
+    }
+
+    // 2) Target-decoration variants on a protected dir (normalization).
+    for t in [
+        "/etc/", "/etc//", "/etc/.", "/etc/*", "//etc", "'/etc'", "\"/etc\"", "/*", "/etc/",
+    ] {
+        block.push((format!("rm -rf {t}"), av(&["rm", "-rf", t])));
+    }
+
+    // 3) Target BEFORE flags (GNU-style option-after-operand).
+    block.push(("rm /etc -rf".into(), av(&["rm", "/etc", "-rf"])));
+    block.push((
+        "rm /root --force -r".into(),
+        av(&["rm", "/root", "--force", "-r"]),
+    ));
+
+    // 4) rm reached by an absolute/qualified path (…/rm branch).
+    block.push(("/bin/rm -rf /etc".into(), av(&["/bin/rm", "-rf", "/etc"])));
+    block.push((
+        "/usr/bin/rm -rf /var".into(),
+        av(&["/usr/bin/rm", "-rf", "/var"]),
+    ));
+
+    // 5) HOME: literal, un-expanded references and their data-folder children.
+    for t in [
+        "~",
+        "~/",
+        "~/*",
+        "$HOME",
+        "${HOME}",
+        "$HOME/",
+        "$HOME/*",
+        "%USERPROFILE%",
+        "~/Documents",
+        "~/Desktop",
+        "~/Downloads",
+        "~/Pictures",
+        "~/Music",
+        "~/Movies",
+        "$HOME/Documents",
+        "$HOME/Downloads",
+    ] {
+        block.push((format!("rm -rf {t}"), av(&["rm", "-rf", t])));
+    }
+
+    // 6) HOME: resolved absolute spellings per OS (incl. Windows /c/ form).
+    for t in [
+        "/home/alice",
+        "/home/alice/Documents",
+        "/Users/alice",
+        "/Users/alice/Desktop",
+        r"C:\Users\alice",
+        r"C:\Users\alice\Documents",
+        "/c/Users/alice",
+        "/c/Users/alice/Downloads",
+    ] {
+        block.push((format!("rm -rf {t}"), av(&["rm", "-rf", t])));
+    }
+
+    // 7) Wrapped in `bash -c` / `sh -c`, incl. chaining and obfuscation.
+    let payloads = [
+        "rm -rf /etc",
+        "rm -rf $HOME",
+        "echo hi && rm -rf /etc",
+        "cd /tmp; rm -rf /var",
+        "true || rm -rf /root",
+        "rm -rf ~/Documents",
+        r#"r"m" -"r"f /etc"#,          // quote-insertion on the command
+        r#"rm -r"f" ~"#,               // quote-insertion on the flag
+        "rm -rf '/etc'",               // quoted target inside payload
+        "echo a\nrm -rf /etc\necho b", // buried in a multiline script
+    ];
+    for p in payloads {
+        block.push((format!("bash -c «{p}»"), av(&["bash", "-c", p])));
+        block.push((format!("sh -c «{p}»"), av(&["sh", "-c", p])));
+    }
+
+    // ── Run the block sweep, collecting EVERY miss. ──────────────────────
+    assert!(
+        block.len() >= 100,
+        "sanity: expected 100+ destructive cases, built {}",
+        block.len()
+    );
+    let mut bypasses: Vec<String> = Vec::new();
+    for (label, argv) in &block {
+        let a: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        if !guard_blocks(&a, &homes) {
+            bypasses.push(label.clone());
+        }
+    }
+
+    // ── Benign control set: MUST NOT be blocked (no false positives). ────
+    let allow: &[(&str, &[&str])] = &[
+        ("rm -rf ./build", &["rm", "-rf", "./build"]),
+        ("rm -rf target", &["rm", "-rf", "target"]),
+        ("rm -rf node_modules", &["rm", "-rf", "node_modules"]),
+        ("rm -rf dist", &["rm", "-rf", "dist"]),
+        ("rm -rf ./target/debug", &["rm", "-rf", "./target/debug"]),
+        ("rm -rf build/", &["rm", "-rf", "build/"]),
+        (
+            "rm -rf /home/alice/project",
+            &["rm", "-rf", "/home/alice/project"],
+        ),
+        (
+            "rm -rf /Users/alice/src/app",
+            &["rm", "-rf", "/Users/alice/src/app"],
+        ),
+        ("rm -rf /tmp/scratch", &["rm", "-rf", "/tmp/scratch"]),
+        ("rm -f /etc/hosts", &["rm", "-f", "/etc/hosts"]), // no -r → not recursive
+        ("rm file.txt", &["rm", "file.txt"]),
+        (
+            "bash -c 'cargo build && rm -rf target'",
+            &["bash", "-c", "cargo build && rm -rf target"],
+        ),
+        ("bash -c 'rm -rf ./out'", &["bash", "-c", "rm -rf ./out"]),
+    ];
+    let mut false_blocks: Vec<String> = Vec::new();
+    for (label, argv) in allow {
+        if guard_blocks(argv, &homes) {
+            false_blocks.push((*label).to_string());
+        }
+    }
+
+    eprintln!(
+        "guard sandbox: {} destructive cases, {} bypassed; {} benign cases, {} false-blocked",
+        block.len(),
+        bypasses.len(),
+        allow.len(),
+        false_blocks.len()
+    );
+
+    assert!(
+        bypasses.is_empty(),
+        "GUARD BYPASSED — these destructive rm -rf variants were NOT blocked \
+         (a real rm would have executed):\n  - {}",
+        bypasses.join("\n  - ")
+    );
+    assert!(
+        false_blocks.is_empty(),
+        "FALSE POSITIVE — these benign commands were wrongly blocked:\n  - {}",
+        false_blocks.join("\n  - ")
+    );
+}
+
+/// Regression net for the advanced obfuscations surfaced by the sandbox probe
+/// (traversal, home parents, nested `-c`, wrapper/env prefixes, `~user`). Each
+/// MUST be blocked; misses are collected into one report.
+#[test]
+fn sandbox_advanced_obfuscations_are_blocked() {
+    let homes: Vec<String> = ["/home/alice", "/Users/alice", r"C:\Users\alice"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let cases: &[(&str, &[&str])] = &[
+        // 1) `..` traversal that resolves back into a protected path.
+        ("rm -rf /etc/../etc", &["rm", "-rf", "/etc/../etc"]),
+        ("rm -rf /etc/..", &["rm", "-rf", "/etc/.."]),
+        ("rm -rf /var/log/../..", &["rm", "-rf", "/var/log/../.."]),
+        (
+            "rm -rf /home/alice/../alice",
+            &["rm", "-rf", "/home/alice/../alice"],
+        ),
+        ("rm -rf ~/../alice", &["rm", "-rf", "~/../alice"]),
+        (
+            "bash -c rm -rf $HOME/../alice",
+            &["bash", "-c", "rm -rf $HOME/../alice"],
+        ),
+        // 2) Home parents — wipes every account at once.
+        ("rm -rf /home", &["rm", "-rf", "/home"]),
+        ("rm -rf /Users", &["rm", "-rf", "/Users"]),
+        ("rm -rf /home/", &["rm", "-rf", "/home/"]),
+        ("rm -rf /home/*", &["rm", "-rf", "/home/*"]),
+        ("rm -rf C:\\Users", &["rm", "-rf", r"C:\Users"]),
+        ("rm -rf /c/Users", &["rm", "-rf", "/c/Users"]),
+        // 3) Nested shell -c.
+        (
+            "bash -c bash -c rm -rf /etc",
+            &["bash", "-c", "bash -c 'rm -rf /etc'"],
+        ),
+        (
+            "sh -c bash -c rm -rf $HOME",
+            &["sh", "-c", "bash -c \"rm -rf $HOME\""],
+        ),
+        // 4) Env-assignment and command-wrapper prefixes.
+        ("env rm -rf /etc", &["env", "rm", "-rf", "/etc"]),
+        ("sudo rm -rf /root", &["sudo", "rm", "-rf", "/root"]),
+        (
+            "env FOO=1 rm -rf /var",
+            &["env", "FOO=1", "rm", "-rf", "/var"],
+        ),
+        (
+            "bash -c X=1 rm -rf /etc",
+            &["bash", "-c", "X=1 rm -rf /etc"],
+        ),
+        ("bash -c env rm -rf ~", &["bash", "-c", "env rm -rf ~"]),
+        // 5) `~user` — another account's home.
+        ("rm -rf ~root", &["rm", "-rf", "~root"]),
+        (
+            "rm -rf ~alice/Documents",
+            &["rm", "-rf", "~alice/Documents"],
+        ),
+    ];
+    let mut misses: Vec<String> = Vec::new();
+    for (label, argv) in cases {
+        if !guard_blocks(argv, &homes) {
+            misses.push((*label).to_string());
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "these advanced destructive variants were NOT blocked:\n  - {}",
+        misses.join("\n  - ")
+    );
+}
+
+/// Honest documentation of the guard's ARCHITECTURAL limits: a static lint can't
+/// resolve these without being a shell + filesystem, so they are (knowingly) NOT
+/// blocked. This test pins that boundary — if a future change starts catching one
+/// of these, update the module doc-comment and move it to the blocked set.
+#[test]
+fn guard_known_lint_limits_are_documented() {
+    let homes: Vec<String> = ["/home/alice"].iter().map(|s| s.to_string()).collect();
+    let known_gaps: &[(&str, &[&str])] = &[
+        (
+            "command substitution",
+            &["bash", "-c", "rm -rf $(echo /etc)"],
+        ),
+        ("eval", &["bash", "-c", "eval 'rm -rf /etc'"]),
+        ("glob expansion", &["bash", "-c", "rm -rf /e*"]),
+        (
+            "target via stdin/xargs",
+            &["bash", "-c", "echo /etc | xargs rm -rf"],
+        ),
+        ("indirect var", &["bash", "-c", "D=/etc; rm -rf $D"]),
+        ("find -delete", &["find", "/", "-delete"]),
+    ];
+    for (label, argv) in known_gaps {
+        assert!(
+            !guard_blocks(argv, &homes),
+            "'{label}' is now BLOCKED — good, but update the doc-comment and \
+             move it to the blocked set: {argv:?}"
+        );
+    }
+}
+
 // ── adaptive_event field: unit coverage ──────────────────────────────────
 
 /// Back-compat: a record written by an older l0-cache (no `adaptive_event`
