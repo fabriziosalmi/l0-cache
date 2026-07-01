@@ -66,6 +66,8 @@ pub(crate) use stats::*;
 #[cfg(test)]
 use datetime::to_rfc3339;
 #[cfg(test)]
-use guard::{is_critical_target, normalize_guard_path, parse_bool_env};
+use guard::{
+    check_dangerous_command_with_homes, is_critical_target, normalize_guard_path, parse_bool_env,
+};
 #[cfg(test)]
 mod tests;

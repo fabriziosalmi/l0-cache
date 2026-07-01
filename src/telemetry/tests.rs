@@ -908,6 +908,148 @@ fn test_normalize_guard_path() {
     assert!(!is_critical_target("target/"));
 }
 
+// ── Home / user-data protection (cross-OS) ───────────────────────────────
+//
+// These simulate each OS's home layout via `check_dangerous_command_with_homes`
+// so they don't depend on (or mutate) the real `$HOME`. They MUST fail before
+// the home-coverage fix and pass after it.
+
+/// Per-OS home roots used to simulate Linux, macOS, and Windows layouts.
+const SIM_HOMES: &[&str] = &[
+    "/home/alice",     // Linux
+    "/Users/alice",    // macOS
+    r"C:\Users\alice", // Windows (backslashes, drive letter)
+];
+
+fn rm_rf(target: &str) -> Vec<String> {
+    vec!["rm".to_string(), "-rf".to_string(), target.to_string()]
+}
+
+/// `rm -rf ~`, `rm -rf $HOME`, and their data-subdir globs are blocked even
+/// with NO resolved home (literal tokens are always protected), and for every
+/// simulated OS home too.
+#[test]
+fn guard_blocks_literal_home_targets() {
+    for homes in [&[] as &[&str], &["/home/alice"], SIM_HOMES] {
+        let homes: Vec<String> = homes.iter().map(|s| s.to_string()).collect();
+        for target in [
+            "~",
+            "$HOME",
+            "${HOME}",
+            "%USERPROFILE%",
+            "~/",
+            "~/*",
+            "$HOME/*",
+            "~/Documents",
+            "$HOME/Downloads",
+        ] {
+            assert!(
+                check_dangerous_command_with_homes("rm", &rm_rf(target), &homes).is_err(),
+                "rm -rf {target} should be blocked (homes={homes:?})"
+            );
+        }
+    }
+}
+
+/// The resolved HOME itself, and its first-level data folders, are blocked for
+/// each simulated OS (Linux `/home`, macOS `/Users`, Windows `C:\Users` and its
+/// `/c/Users` POSIX-shell spelling).
+#[test]
+fn guard_blocks_resolved_home_per_os() {
+    let homes: Vec<String> = SIM_HOMES.iter().map(|s| s.to_string()).collect();
+    let targets = [
+        "/home/alice",
+        "/home/alice/Documents",
+        "/Users/alice",
+        "/Users/alice/Desktop",
+        r"C:\Users\alice",
+        r"C:\Users\alice\Documents",
+        "/c/Users/alice", // Git Bash / MSYS spelling of the Windows home
+        "/c/Users/alice/Downloads",
+    ];
+    for target in targets {
+        assert!(
+            check_dangerous_command_with_homes("rm", &rm_rf(target), &homes).is_err(),
+            "rm -rf {target} should be blocked"
+        );
+    }
+}
+
+/// No false positives: benign relative targets and non-data subdirs under home
+/// stay allowed.
+#[test]
+fn guard_allows_benign_relative_targets() {
+    let homes: Vec<String> = SIM_HOMES.iter().map(|s| s.to_string()).collect();
+    for target in [
+        "target",
+        "./build",
+        "build/",
+        "node_modules",
+        "dist",
+        "/home/alice/project", // a project dir under home is fine
+        "/Users/alice/src/app",
+    ] {
+        assert!(
+            check_dangerous_command_with_homes("rm", &rm_rf(target), &homes).is_ok(),
+            "rm -rf {target} should be allowed"
+        );
+    }
+}
+
+/// Quote-insertion inside a `bash -c` payload no longer bypasses the guard:
+/// `r"m" -"r"f /etc` de-obfuscates to `rm -rf /etc`, and `rm -rf $HOME`
+/// matches the literal home token.
+#[test]
+fn guard_blocks_obfuscated_shell_payloads() {
+    let homes: Vec<String> = SIM_HOMES.iter().map(|s| s.to_string()).collect();
+
+    let quoted = vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        r#"r"m" -"r"f /etc"#.to_string(),
+    ];
+    assert!(
+        check_dangerous_command_with_homes("bash", &quoted, &homes).is_err(),
+        "quote-inserted rm -rf /etc should be blocked"
+    );
+
+    let home_payload = vec![
+        "bash".to_string(),
+        "-c".to_string(),
+        "rm -rf $HOME".to_string(),
+    ];
+    assert!(
+        check_dangerous_command_with_homes("bash", &home_payload, &homes).is_err(),
+        "bash -c 'rm -rf $HOME' should be blocked"
+    );
+}
+
+/// A long, mostly-benign multiline payload with one destructive line buried in
+/// the middle is still blocked.
+#[test]
+fn guard_blocks_destructive_line_buried_in_benign_script() {
+    let homes: Vec<String> = SIM_HOMES.iter().map(|s| s.to_string()).collect();
+    let script = "echo starting build\n\
+         cargo fmt --check\n\
+         cargo clippy --all-targets\n\
+         rm -rf ~/Documents\n\
+         cargo test --release\n\
+         echo all green";
+    let cmd = vec!["bash".to_string(), "-c".to_string(), script.to_string()];
+    assert!(
+        check_dangerous_command_with_homes("bash", &cmd, &homes).is_err(),
+        "a destructive line in the middle of a benign script should be blocked"
+    );
+
+    // The same script WITHOUT the destructive line must pass.
+    let benign = script.replace("rm -rf ~/Documents\n", "");
+    let cmd_ok = vec!["bash".to_string(), "-c".to_string(), benign];
+    assert!(
+        check_dangerous_command_with_homes("bash", &cmd_ok, &homes).is_ok(),
+        "the benign-only script should be allowed"
+    );
+}
+
 // ── adaptive_event field: unit coverage ──────────────────────────────────
 
 /// Back-compat: a record written by an older l0-cache (no `adaptive_event`

@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The destructive-command guard now protects the user's HOME, not just system
+  roots.** Previously `rm -rf ~`, `rm -rf $HOME`, and `rm -rf ~/Documents`
+  passed the guard and executed (a real incident): only `/`, `/etc`, `/usr`, …
+  were covered. The recursive force-remove check now also blocks:
+  - the HOME directory resolved at runtime from the environment
+    (`$HOME` / `%USERPROFILE%` / `HOMEDRIVE`+`HOMEPATH`), both the exact path
+    and its `…/*` glob;
+  - its first-level data folders (Documents, Desktop, Downloads, Pictures,
+    Movies, Music, and the Linux XDG equivalents Videos/Public/Templates);
+  - literal, un-expanded `~`, `$HOME`, `${HOME}`, `%USERPROFILE%` references
+    (in case they reach the `bash -c` re-scan without a shell expanding them).
+
+  Coverage is cross-OS: Linux (`/home/<user>`, XDG dirs), macOS
+  (`/Users/<user>`), and Windows (`C:\Users\<user>`, backslash separators,
+  drive letters, and the `/c/Users` spelling used by Git Bash / MSYS) all
+  normalize to a common comparison form.
+- **Quote-insertion no longer bypasses the `bash -c` re-scan.** The `-c`
+  payload is now tokenized with a minimal quote-aware de-obfuscator (removing
+  `'…'`/`"…"` quotes and honoring `\` escapes) before matching, so
+  `bash -c 'r"m" -"r"f /etc'` recomposes to `rm -rf /etc` and is blocked. The
+  previous `split_whitespace` re-scan matched only the direct-argv form.
+
+### Notes
+- The guard remains a **best-effort lint, not a sandbox**: it does not perform
+  variable expansion, command substitution, path canonicalization, or symlink
+  resolution, and a determined caller can still evade it. Opt out as before with
+  `--no-guard` / `L0_CACHE_GUARD=0`.
+
 ## [0.1.12] - 2026-06-23
 
 ### Added
