@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-07
+
+### Changed — project renamed `l0-cache` → `l0-compressor`
+
+The name never matched the tool: there is no cache. `l0-compressor` is what it
+actually does — a universal command-output *compressor* (head/tail, collapse,
+diff-aware filtering) — and matches the `l0_compressor` name the downstream
+llmproxy plugin already uses. The rename is mechanical and preserves history;
+old release tags (`v0.1.0`..`v0.1.15`) remain the frozen `l0-cache` artifacts.
+
+- **Binary is now `l0-compressor`**, with `l0-comp` as the short alias (the
+  legacy `t` alias is unchanged). The Homebrew formula, `install.sh`,
+  `install-binary.sh`, and `make install` all create both aliases.
+- **Environment variables are now `L0_COMPRESSOR_*`** (`_GUARD`,
+  `_NO_TELEMETRY`, `_BIN_DIR`, `_VERSION`, `_GIT_HASH`). The two runtime knobs
+  keep reading their **pre-rename `L0_CACHE_GUARD` / `L0_CACHE_NO_TELEMETRY`
+  names as a deprecated fallback**, so existing hooks/integrations don't break;
+  these fallbacks will be removed at the next major.
+- **Data/config directories moved** to `…/l0-compressor/` (from
+  `…/l0-cache/`). On first run the tool performs a one-time, **non-destructive**
+  migration: it renames the legacy directory into place only when the new one
+  does not yet exist, so accumulated `metrics.jsonl` / `tuned.jsonl` / `config.*`
+  carry over. Nothing is ever deleted; if a new dir already exists the legacy
+  one is left untouched.
+- Homebrew tap/formula, repository URLs, docs, and completions updated to the
+  new name (`brew tap fabriziosalmi/l0-compressor …`).
+
 ## [0.1.15] - 2026-07-01
 
 Hardening / security / performance pass (three parallel audits, findings

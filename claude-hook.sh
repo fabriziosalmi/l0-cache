@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# claude-hook.sh — manage the transparent l0-cache integration for Claude Code.
+# claude-hook.sh — manage the transparent l0-compressor integration for Claude Code.
 #
 # NOTE: for multiple agents (Claude Code AND Gemini CLI) use `agent-hook.sh`,
 # which generalizes this script. This one stays as a Claude-only convenience.
 #
 # Installs a PreToolUse hook that routes *simple* Bash commands Claude Code runs
-# through `l0-cache` (to cut token usage), without the model prefixing anything.
+# through `l0-compressor` (to cut token usage), without the model prefixing anything.
 # It is conservative (compound/piped/interactive/stateful commands pass through
 # untouched), fail-safe (any error → the command runs unchanged), and OFF by
 # default — toggle it on/off at runtime with no restart.
@@ -15,7 +15,7 @@
 #   ./claude-hook.sh install     Install the wrapper + register the hook (idempotent)
 #   ./claude-hook.sh enable      Turn the hook ON  (create the toggle file)
 #   ./claude-hook.sh disable     Turn the hook OFF (remove the toggle file)
-#   ./claude-hook.sh status      Show install / enabled state + l0-cache version
+#   ./claude-hook.sh status      Show install / enabled state + l0-compressor version
 #   ./claude-hook.sh uninstall   Remove the hook registration and wrapper script
 #   ./claude-hook.sh help
 #
@@ -35,8 +35,8 @@ trap 'rm -f "$_l0_tmp"' EXIT
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS="$CLAUDE_DIR/settings.json"
-WRAPPER="$HOOKS_DIR/l0-cache-wrapper.sh"
-TOGGLE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/l0-cache"
+WRAPPER="$HOOKS_DIR/l0-compressor-wrapper.sh"
+TOGGLE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/l0-compressor"
 TOGGLE="$TOGGLE_DIR/hook.enabled"
 
 # Color only on an interactive terminal with NO_COLOR unset.
@@ -59,12 +59,12 @@ write_wrapper() {
   cat > "$WRAPPER" <<'WRAP'
 #!/usr/bin/env bash
 # Claude Code PreToolUse hook — transparently route simple Bash commands through
-# `l0-cache`. CONSERVATIVE + FAIL-SAFE + OFF by default. Managed by claude-hook.sh.
-# Toggle:  touch ~/.config/l0-cache/hook.enabled   (on)
-#          rm -f ~/.config/l0-cache/hook.enabled   (off)
-toggle="${XDG_CONFIG_HOME:-$HOME/.config}/l0-cache/hook.enabled"
+# `l0-compressor`. CONSERVATIVE + FAIL-SAFE + OFF by default. Managed by claude-hook.sh.
+# Toggle:  touch ~/.config/l0-compressor/hook.enabled   (on)
+#          rm -f ~/.config/l0-compressor/hook.enabled   (off)
+toggle="${XDG_CONFIG_HOME:-$HOME/.config}/l0-compressor/hook.enabled"
 [ -f "$toggle" ] || exit 0
-command -v l0-cache >/dev/null 2>&1 || exit 0
+command -v l0-compressor >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
 input="$(cat)"
@@ -74,7 +74,7 @@ cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // .toolInput.command /
 
 # Already wrapped?
 case "$cmd" in
-  l0-cache\ * | t\ * | */l0-cache\ * | */t\ *) exit 0 ;;
+  l0-compressor\ * | t\ * | */l0-compressor\ * | */t\ *) exit 0 ;;
 esac
 
 # Risky to wrap: shell operators, redirects, subshells, substitution, multi-line,
@@ -87,7 +87,7 @@ case "$cmd" in
   for\ * | while\ * | until\ * | if\ * | case\ * | function\ * | '{'* | '('*) exit 0 ;;
 esac
 
-# Interactive / TUI / REPL programs: l0-cache would capture instead of passthrough.
+# Interactive / TUI / REPL programs: l0-compressor would capture instead of passthrough.
 first="${cmd%% *}"; first="${first##*/}"
 case "$first" in
   vim | vi | nvim | nano | emacs | less | more | man | htop | top | btop | ssh | telnet | fzf | tmux | screen | watch | python | python3 | node | irb | psql | mysql | sqlite3 | tig | lazygit) exit 0 ;;
@@ -97,7 +97,7 @@ esac
 # permissionDecision → wrapped commands still go through your normal permissions.
 # `--recover` saves full output to a temp file on a failing, truncated command.
 printf '%s' "$input" | jq -c \
-  --arg new "l0-cache --quiet --recover $cmd" \
+  --arg new "l0-compressor --quiet --recover $cmd" \
   '{hookSpecificOutput: {hookEventName: "PreToolUse", updatedInput: (.tool_input + {command: $new})}}' 2>/dev/null || exit 0
 WRAP
   chmod +x "$WRAPPER"
@@ -105,7 +105,7 @@ WRAP
 
 cmd_install() {
   need_jq
-  info "Installing l0-cache Claude Code hook..."
+  info "Installing l0-compressor Claude Code hook..."
   write_wrapper
   ok "Wrapper written: $WRAPPER"
 
@@ -162,8 +162,8 @@ cmd_disable() {
 }
 
 cmd_status() {
-  printf '%sl0-cache Claude Code hook%s\n' "$c_b" "$c_0"
-  if command -v l0-cache >/dev/null 2>&1; then ok "l0-cache: $(l0-cache --version 2>/dev/null)"; else err "l0-cache: not found in PATH"; fi
+  printf '%sl0-compressor Claude Code hook%s\n' "$c_b" "$c_0"
+  if command -v l0-compressor >/dev/null 2>&1; then ok "l0-compressor: $(l0-compressor --version 2>/dev/null)"; else err "l0-compressor: not found in PATH"; fi
   if [ -f "$WRAPPER" ]; then ok "wrapper installed: $WRAPPER"; else warn "wrapper NOT installed (run: install)"; fi
   if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ] && jq -e --arg h "$WRAPPER" '(.hooks.PreToolUse // []) | any((.hooks // []) | any(.command == $h))' "$SETTINGS" >/dev/null 2>&1; then
     ok "registered in settings.json"

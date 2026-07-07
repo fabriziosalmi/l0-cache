@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# agent-hook.sh — transparent l0-cache integration for AI coding agents.
+# agent-hook.sh — transparent l0-compressor integration for AI coding agents.
 #
 # Installs a hook that routes the *simple* Bash commands an agent runs through
-# `l0-cache` (to cut token usage), with the model prefixing nothing. Conservative
+# `l0-compressor` (to cut token usage), with the model prefixing nothing. Conservative
 # (compound/piped/interactive/stateful commands pass through untouched), fail-safe
 # (any error → the command runs unchanged), and OFF by default — toggle at runtime.
 #
@@ -37,7 +37,7 @@ set -euo pipefail
 _l0_tmp=""
 trap 'rm -f "$_l0_tmp"' EXIT
 
-TOGGLE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/l0-cache"
+TOGGLE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/l0-compressor"
 TOGGLE="$TOGGLE_DIR/hook.enabled"
 
 c_g=''; c_y=''; c_r=''; c_b=''; c_0=''
@@ -76,20 +76,20 @@ select_agent() {
   esac
   HOOKS_DIR="$AGENT_DIR/hooks"
   SETTINGS="$AGENT_DIR/settings.json"
-  WRAPPER="$HOOKS_DIR/l0-cache-wrapper.sh"
+  WRAPPER="$HOOKS_DIR/l0-compressor-wrapper.sh"
 }
 
 write_wrapper() {
   mkdir -p "$HOOKS_DIR"
   {
     printf '%s\n' '#!/usr/bin/env bash'
-    printf '%s\n' "# l0-cache transparent hook for $AGENT. Managed by agent-hook.sh."
+    printf '%s\n' "# l0-compressor transparent hook for $AGENT. Managed by agent-hook.sh."
     printf '%s\n' '# CONSERVATIVE + FAIL-SAFE + OFF by default.'
     printf 'OUTPUT_JQ=%q\n' "$OUTPUT_JQ"
     cat <<'WRAP'
-toggle="${XDG_CONFIG_HOME:-$HOME/.config}/l0-cache/hook.enabled"
+toggle="${XDG_CONFIG_HOME:-$HOME/.config}/l0-compressor/hook.enabled"
 [ -f "$toggle" ] || exit 0
-command -v l0-cache >/dev/null 2>&1 || exit 0
+command -v l0-compressor >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
 input="$(cat)"
@@ -99,7 +99,7 @@ cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // .toolInput.command /
 
 # Already wrapped?
 case "$cmd" in
-  l0-cache\ * | t\ * | */l0-cache\ * | */t\ *) exit 0 ;;
+  l0-compressor\ * | t\ * | */l0-compressor\ * | */t\ *) exit 0 ;;
 esac
 
 # Risky to wrap: shell operators, redirects, subshells, substitution, multi-line,
@@ -112,7 +112,7 @@ case "$cmd" in
   for\ * | while\ * | until\ * | if\ * | case\ * | function\ * | '{'* | '('*) exit 0 ;;
 esac
 
-# Interactive / TUI / REPL programs: l0-cache would capture instead of passthrough.
+# Interactive / TUI / REPL programs: l0-compressor would capture instead of passthrough.
 first="${cmd%% *}"; first="${first##*/}"
 case "$first" in
   vim | vi | nvim | nano | emacs | less | more | man | htop | top | btop | ssh | telnet | fzf | tmux | screen | watch | python | python3 | node | irb | psql | mysql | sqlite3 | tig | lazygit) exit 0 ;;
@@ -121,7 +121,7 @@ esac
 # Wrap. Keep every other field; only the command changes. No permission decision
 # is set, so wrapped commands still go through the agent's normal approvals.
 # `--recover` saves full output to a temp file on a failing, truncated command.
-printf '%s' "$input" | jq -c --arg new "l0-cache --quiet --recover $cmd" "$OUTPUT_JQ" 2>/dev/null || exit 0
+printf '%s' "$input" | jq -c --arg new "l0-compressor --quiet --recover $cmd" "$OUTPUT_JQ" 2>/dev/null || exit 0
 WRAP
   } > "$WRAPPER"
   chmod +x "$WRAPPER"
@@ -129,7 +129,7 @@ WRAP
 
 cmd_install() {
   need_jq
-  info "Installing l0-cache hook for $c_b$AGENT$c_0..."
+  info "Installing l0-compressor hook for $c_b$AGENT$c_0..."
   write_wrapper
   ok "Wrapper written: $WRAPPER"
 
@@ -185,8 +185,8 @@ cmd_disable() {
 }
 
 cmd_status() {
-  printf '%sl0-cache hook — %s%s\n' "$c_b" "$AGENT" "$c_0"
-  if command -v l0-cache >/dev/null 2>&1; then ok "l0-cache: $(l0-cache --version 2>/dev/null)"; else err "l0-cache: not found in PATH"; fi
+  printf '%sl0-compressor hook — %s%s\n' "$c_b" "$AGENT" "$c_0"
+  if command -v l0-compressor >/dev/null 2>&1; then ok "l0-compressor: $(l0-compressor --version 2>/dev/null)"; else err "l0-compressor: not found in PATH"; fi
   if [ -f "$WRAPPER" ]; then ok "wrapper installed: $WRAPPER"; else warn "wrapper NOT installed (run: install $AGENT)"; fi
   if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ] && jq -e --arg ev "$EVENT" --arg h "$WRAPPER" '(.hooks[$ev] // []) | any((.hooks // []) | any(.command == $h))' "$SETTINGS" >/dev/null 2>&1; then
     ok "registered in $SETTINGS"

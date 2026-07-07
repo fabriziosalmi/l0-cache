@@ -1082,7 +1082,7 @@ fn sandbox_rm_rf_in_100_ways_is_always_blocked() {
         .collect();
 
     // Cases that MUST be blocked. (label, argv-after-nothing) — argv[0] is the
-    // binary, the rest are its args exactly as they'd reach l0-cache.
+    // binary, the rest are its args exactly as they'd reach l0-compressor.
     let mut block: Vec<(String, Vec<String>)> = Vec::new();
 
     // 1) Flag-form × system-root sweep (order-independent -r + -f detection).
@@ -1354,7 +1354,7 @@ fn guard_known_lint_limits_are_documented() {
 
 // ── adaptive_event field: unit coverage ──────────────────────────────────
 
-/// Back-compat: a record written by an older l0-cache (no `adaptive_event`
+/// Back-compat: a record written by an older l0-compressor (no `adaptive_event`
 /// field at all) must deserialize cleanly with the field set to `None`.
 #[test]
 fn adaptive_event_old_record_parses_as_none() {
@@ -1632,7 +1632,7 @@ fn tuned_entry_ttl_filters_stale_and_garbage_timestamps() {
 #[test]
 fn lookup_tuned_ignores_expired_entries() {
     let dir = std::env::temp_dir().join(format!(
-        "l0-cache-ttl-test-{}",
+        "l0-compressor-ttl-test-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2012,7 +2012,7 @@ fn save_tuned_compaction_prunes_stale_other_bucket() {
 #[test]
 fn lookup_tuned_garbage_later_line_does_not_mask_fresh_entry() {
     let dir = std::env::temp_dir().join(format!(
-        "l0-cache-ttl-mask-{}",
+        "l0-compressor-ttl-mask-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2771,7 +2771,7 @@ fn step4_decay_steady_no_op_when_floor_eats_saving() {
 fn step5_tmp_path(tag: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!(
-        "l0-cache-step5-{}-{}-{}.jsonl",
+        "l0-compressor-step5-{}-{}-{}.jsonl",
         tag,
         std::process::id(),
         std::time::SystemTime::now()

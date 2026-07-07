@@ -187,7 +187,7 @@ pub(crate) fn aggregate_metrics(since: Option<&str>) -> StatsData {
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("l0-cache: error reading {}: {}", path.display(), e);
+            eprintln!("l0-compressor: error reading {}: {}", path.display(), e);
             return StatsData::Empty;
         }
     };
@@ -260,7 +260,7 @@ pub(crate) fn aggregate_content(content: &str, cutoff: Option<u64>) -> Option<St
         entry.tokens_raw_total += metric.tokens_raw;
 
         // Auto-tuning event classification. Unknown tags are ignored (forward-
-        // compat: a newer l0-cache could write a tag this build doesn't know).
+        // compat: a newer l0-compressor could write a tag this build doesn't know).
         if let Some(tag) = metric.adaptive_event.as_deref() {
             match tag {
                 ADAPTIVE_EVENT_EXPAND_TAIL_ERR => {

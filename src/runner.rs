@@ -87,7 +87,7 @@ fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::proces
         Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "l0-cache: 'sh' shell not found in PATH. Cannot merge stderr. Install a POSIX shell or use `l0-cache -i` for passthrough mode.",
+                "l0-compressor: 'sh' shell not found in PATH. Cannot merge stderr. Install a POSIX shell or use `l0-compressor -i` for passthrough mode.",
             ));
         }
         Err(e) => return Err(e),
@@ -455,7 +455,7 @@ pub fn run_captured(
         let truncated = raw_bytes_total > shown_bytes;
         if truncated {
             output.push_str(&format!(
-                "\n... [l0-cache: binary output detected — showing first {} of {} bytes] ...\n",
+                "\n... [l0-compressor: binary output detected — showing first {} of {} bytes] ...\n",
                 shown_bytes, raw_bytes_total
             ));
         }
@@ -482,14 +482,14 @@ pub fn run_captured(
         if raw_capped {
             all_lines.push(String::new());
             all_lines.push(format!(
-                "... [output truncated at {}MB by l0-cache --raw] ...",
+                "... [output truncated at {}MB by l0-compressor --raw] ...",
                 RAW_MODE_MAX_BYTES / (1024 * 1024)
             ));
         }
 
         let mut output = all_lines.join("\n");
         if killed_by_watchdog {
-            let msg = format!("\n... [l0-cache: Command killed due to {}s output inactivity. Is it waiting for interactive input?] ...\n", idle_timeout);
+            let msg = format!("\n... [l0-compressor: Command killed due to {}s output inactivity. Is it waiting for interactive input?] ...\n", idle_timeout);
             output.push_str(&msg);
         }
         let bytes_final = output.len();
@@ -531,7 +531,7 @@ pub fn run_captured(
 
         let mut filter_result = pipe.finish(threshold, raw_bytes_total, display_tail);
         if killed_by_watchdog {
-            let msg = format!("\n... [l0-cache: Command killed due to {}s output inactivity. Is it waiting for interactive input?] ...\n", idle_timeout);
+            let msg = format!("\n... [l0-compressor: Command killed due to {}s output inactivity. Is it waiting for interactive input?] ...\n", idle_timeout);
             filter_result.output.push_str(&msg);
             // Count it as truncated so it triggers banner logic
             filter_result.truncated = true;

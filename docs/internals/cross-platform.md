@@ -20,7 +20,7 @@
 
 ```sh
 cargo build --release
-# produces: target/release/l0-cache (arm64 or x86_64, depending on host)
+# produces: target/release/l0-compressor (arm64 or x86_64, depending on host)
 ```
 
 ### Linux glibc (Ubuntu, Debian, RHEL)
@@ -44,7 +44,7 @@ recommended build for containers and minimal environments.
 
 ## Shell Compatibility
 
-The `2>&1` redirect and single-quote escaping used by `l0-cache` are POSIX sh
+The `2>&1` redirect and single-quote escaping used by `l0-compressor` are POSIX sh
 compatible. They work identically on:
 
 - **dash** (Ubuntu default `/bin/sh`)
@@ -53,19 +53,19 @@ compatible. They work identically on:
 - **busybox ash** (Alpine default `/bin/sh`)
 
 The only environment where this fails is distroless containers or scratch
-images that have no shell at all. In that case, use `l0-cache -i` for passthrough
+images that have no shell at all. In that case, use `l0-compressor -i` for passthrough
 mode (no `2>&1` merge).
 
 ## HOME Resolution
 
-`l0-cache` resolves the data directory in this order:
+`l0-compressor` resolves the data directory in this order:
 
-1. `$XDG_DATA_HOME/l0-cache/`
-2. `$HOME/.local/share/l0-cache/`
+1. `$XDG_DATA_HOME/l0-compressor/`
+2. `$HOME/.local/share/l0-compressor/`
 3. `/etc/passwd` lookup using the current UID
 
 The `/etc/passwd` fallback handles:
 
-- `lxc exec container -- l0-cache cargo test` (no `$HOME`)
+- `lxc exec container -- l0-compressor cargo test` (no `$HOME`)
 - Cron jobs without `HOME=` in the crontab
 - systemd services without `User=` (runs as root, `$HOME` may not be set)

@@ -10,7 +10,7 @@ fn get_t_bin() -> PathBuf {
     if exe.file_name().and_then(|s| s.to_str()) == Some("deps") {
         exe.pop(); // pop deps
     }
-    exe.push("l0-cache");
+    exe.push("l0-compressor");
     exe
 }
 
@@ -41,7 +41,7 @@ fn binary_output_does_not_hang() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to spawn l0-cache");
+        .expect("failed to spawn l0-compressor");
 
     // Wait with a 5 second timeout
     let _status = wait_timeout(child, Duration::from_secs(5)).expect("dd command hung!");
@@ -56,7 +56,7 @@ fn exit_code_propagation() {
         .env("XDG_DATA_HOME", &xdg)
         .args(["sh", "-c", "exit 42"])
         .spawn()
-        .expect("failed to spawn l0-cache");
+        .expect("failed to spawn l0-compressor");
     let status = wait_timeout(child, Duration::from_secs(5)).unwrap();
     assert_eq!(status.code(), Some(42));
     let _ = std::fs::remove_dir_all(&xdg);
@@ -99,7 +99,7 @@ fn integration_banner_appears_when_truncated() {
             "100",
         ])
         .output()
-        .expect("failed to execute l0-cache");
+        .expect("failed to execute l0-compressor");
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert!(stdout_str.contains("[Showing 5 head + 5 tail of 100 lines]"));
     let _ = std::fs::remove_dir_all(&xdg);
@@ -124,7 +124,7 @@ fn integration_banner_does_not_appear_when_not_truncated() {
             "5",
         ])
         .output()
-        .expect("failed to execute l0-cache");
+        .expect("failed to execute l0-compressor");
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout_str.contains("truncated=true"));
     let _ = std::fs::remove_dir_all(&xdg);
@@ -138,7 +138,7 @@ fn integration_auto_flag_accepted() {
         .env("XDG_DATA_HOME", &xdg)
         .args(["--auto", "echo", "hello"])
         .output()
-        .expect("failed to execute l0-cache with --auto");
+        .expect("failed to execute l0-compressor with --auto");
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout_str.trim(), "hello");
     let _ = std::fs::remove_dir_all(&xdg);
@@ -149,7 +149,7 @@ fn test_auto_tuning_success_decay_e2e() {
     let t_bin = get_t_bin();
     let mut temp_dir = std::env::temp_dir();
     let unique_sub = format!(
-        "l0-cache-test-success-{}",
+        "l0-compressor-test-success-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -229,7 +229,7 @@ fn test_auto_tuning_failure_backoff_e2e() {
     let t_bin = get_t_bin();
     let mut temp_dir = std::env::temp_dir();
     let unique_sub = format!(
-        "l0-cache-test-fail-{}",
+        "l0-compressor-test-fail-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -331,7 +331,7 @@ fn test_quiet_flag_suppresses_warnings() {
     let t_bin = get_t_bin();
     let mut temp_dir = std::env::temp_dir();
     let unique_sub = format!(
-        "l0-cache-test-quiet-{}",
+        "l0-compressor-test-quiet-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -356,7 +356,7 @@ fn test_quiet_flag_suppresses_warnings() {
 fn temp_xdg(tag: &str) -> PathBuf {
     let mut dir = std::env::temp_dir();
     dir.push(format!(
-        "l0-cache-it-{}-{}",
+        "l0-compressor-it-{}-{}",
         tag,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -377,7 +377,7 @@ fn tail_error_shows_more_tail_than_success() {
 
     let fail = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--no-auto", "sh", "-c", "seq 1 500; exit 1"])
         .output()
         .unwrap();
@@ -391,7 +391,7 @@ fn tail_error_shows_more_tail_than_success() {
 
     let ok = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--no-auto", "sh", "-c", "seq 1 500; exit 0"])
         .output()
         .unwrap();
@@ -416,7 +416,7 @@ fn clean_success_squelch_trims_tail_and_no_squelch_opts_out() {
 
     let default_run = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--no-auto", "sh", "-c", "seq 1 500; exit 0"])
         .output()
         .unwrap();
@@ -434,7 +434,7 @@ fn clean_success_squelch_trims_tail_and_no_squelch_opts_out() {
 
     let no_squelch = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--no-auto", "--no-squelch", "sh", "-c", "seq 1 500; exit 0"])
         .output()
         .unwrap();
@@ -457,7 +457,7 @@ fn raw_mode_keeps_all_lines_and_no_json_truncation() {
     let xdg = temp_xdg("raw");
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--raw", "seq", "1", "5000"])
         .output()
         .unwrap();
@@ -470,7 +470,7 @@ fn raw_mode_keeps_all_lines_and_no_json_truncation() {
     // A big single-line JSON payload is kept verbatim in --raw.
     let json = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args([
             "--raw",
             "sh",
@@ -491,7 +491,7 @@ fn binary_output_carries_explicit_banner() {
     let xdg = temp_xdg("bin");
     let child = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["sh", "-c", "head -c 200000 /dev/urandom"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -519,7 +519,7 @@ fn idle_timeout_kills_hung_command() {
     let start = Instant::now();
     let child = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--idle-timeout", "1", "sh", "-c", "sleep 8 | cat"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -541,7 +541,7 @@ fn sigterm_is_forwarded_and_propagated() {
     let xdg = temp_xdg("term");
     let child = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["sh", "-c", "sleep 30"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -574,7 +574,7 @@ fn concurrent_metric_writers_do_not_corrupt_the_log() {
         kids.push(
             Command::new(&t)
                 .env("XDG_DATA_HOME", &xdg)
-                .env("L0_CACHE_GUARD", "0")
+                .env("L0_COMPRESSOR_GUARD", "0")
                 .args(["--no-auto", "echo", &format!("run{}", i)])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -585,7 +585,7 @@ fn concurrent_metric_writers_do_not_corrupt_the_log() {
     for k in kids {
         let _ = wait_timeout(k, Duration::from_secs(10));
     }
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let content = std::fs::read_to_string(&metrics).expect("metrics file");
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(
@@ -622,7 +622,7 @@ fn rss_kb(pid: u32) -> Option<u64> {
 #[test]
 fn memory_stays_bounded_on_a_giant_newline_free_stream() {
     // Push ~100 MB as a SINGLE line with no newline (the minified-bundle OOM case).
-    // With the bounded reader, l0-cache must keep only ~1 MB regardless of input
+    // With the bounded reader, l0-compressor must keep only ~1 MB regardless of input
     // size: we sample its RSS while it runs and assert the peak stays far below the
     // input volume. (Before the fix, RSS tracked the input — the line is buffered
     // whole and again as the stored head line → ~200 MB.)
@@ -630,7 +630,7 @@ fn memory_stays_bounded_on_a_giant_newline_free_stream() {
     let xdg = temp_xdg("rss");
     let mut child = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args([
             "--no-auto",
             "sh",
@@ -654,7 +654,9 @@ fn memory_stays_bounded_on_a_giant_newline_free_stream() {
                 }
                 if start.elapsed() > Duration::from_secs(30) {
                     let _ = child.kill();
-                    panic!("l0-cache hung on a 200 MB single line (possible unbounded buffering)");
+                    panic!(
+                        "l0-compressor hung on a 200 MB single line (possible unbounded buffering)"
+                    );
                 }
                 thread::sleep(Duration::from_millis(10));
             }
@@ -675,7 +677,7 @@ fn memory_stays_bounded_on_a_giant_newline_free_stream() {
 fn stats_renders_with_seeded_metrics() {
     let t = get_t_bin();
     let xdg = temp_xdg("stats");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("metrics.jsonl"),
@@ -685,7 +687,7 @@ fn stats_renders_with_seeded_metrics() {
     .unwrap();
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .arg("--stats")
         .output()
         .unwrap();
@@ -706,7 +708,7 @@ fn stats_renders_with_seeded_metrics() {
 fn stats_json_is_machine_readable() {
     let t = get_t_bin();
     let xdg = temp_xdg("statsjson");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("metrics.jsonl"),
@@ -715,7 +717,7 @@ fn stats_json_is_machine_readable() {
     .unwrap();
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json", "--cost-per-mtok", "3"])
         .output()
         .unwrap();
@@ -736,7 +738,7 @@ fn stats_json_is_machine_readable() {
 fn discover_lists_commands() {
     let t = get_t_bin();
     let xdg = temp_xdg("discover");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("metrics.jsonl"),
@@ -745,7 +747,7 @@ fn discover_lists_commands() {
     .unwrap();
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .arg("--discover")
         .output()
         .unwrap();
@@ -760,7 +762,7 @@ fn discover_lists_commands() {
 fn stats_skips_malformed_and_empty_lines() {
     let t = get_t_bin();
     let xdg = temp_xdg("statsmalformed");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     // valid, blank, garbage, valid → exactly 2 rows aggregated, no crash.
     let body = "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"tokens_saved\":900,\"tokens_raw\":1000}\n\
@@ -770,7 +772,7 @@ fn stats_skips_malformed_and_empty_lines() {
     std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -789,9 +791,9 @@ fn config_overrides_apply_and_explicit_cli_wins() {
     let t = get_t_bin();
     let xdg = temp_xdg("cfgprec-data");
     let cfg = temp_xdg("cfgprec-conf");
-    std::fs::create_dir_all(cfg.join("l0-cache")).unwrap();
+    std::fs::create_dir_all(cfg.join("l0-compressor")).unwrap();
     std::fs::write(
-        cfg.join("l0-cache").join("config.json"),
+        cfg.join("l0-compressor").join("config.json"),
         "{\"commands\":{\"seq\":{\"head\":7}}}",
     )
     .unwrap();
@@ -799,7 +801,7 @@ fn config_overrides_apply_and_explicit_cli_wins() {
         let mut c = Command::new(&t);
         c.env("XDG_DATA_HOME", &xdg)
             .env("XDG_CONFIG_HOME", &cfg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .arg("--no-auto")
             .args(extra)
             .args(["seq", "1", "500"]);
@@ -824,16 +826,16 @@ fn config_toml_is_picked_up_transparently() {
     let t = get_t_bin();
     let xdg = temp_xdg("cfgtoml-data");
     let cfg = temp_xdg("cfgtoml-conf");
-    std::fs::create_dir_all(cfg.join("l0-cache")).unwrap();
+    std::fs::create_dir_all(cfg.join("l0-compressor")).unwrap();
     std::fs::write(
-        cfg.join("l0-cache").join("config.toml"),
+        cfg.join("l0-compressor").join("config.toml"),
         "[seq]\nhead = 5\n",
     )
     .unwrap();
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
         .env("XDG_CONFIG_HOME", &cfg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--no-auto", "seq", "1", "500"])
         .output()
         .unwrap();
@@ -863,14 +865,14 @@ fn auto_tuning_section_renders_when_rule_fires_for_real() {
     for _ in 0..3 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
             .output()
             .unwrap();
     }
 
     // metrics.jsonl must now carry at least one adaptive_event=expand_tail_err.
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let body = std::fs::read_to_string(&metrics).expect("metrics file should exist");
     assert!(
         body.contains("\"adaptive_event\":\"expand_tail_err\""),
@@ -880,7 +882,7 @@ fn auto_tuning_section_renders_when_rule_fires_for_real() {
     // --stats must render the new section with non-zero firings.
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .arg("--stats")
         .output()
         .unwrap();
@@ -905,14 +907,14 @@ fn auto_tuning_section_says_quiet_when_no_firings() {
     // honesty: we explicitly say the rule didn't fire instead of hiding it.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("autotune-quiet");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     let body = "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"cargo\",\"args\":\"\",\"tokens_saved\":900,\"tokens_raw\":1000,\"lines_raw\":20,\"lines_final\":20,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":0,\"duration_ms\":5,\"version\":\"0.1.10\"}\n";
     std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
 
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .arg("--stats")
         .output()
         .unwrap();
@@ -934,7 +936,7 @@ fn auto_tuning_json_block_is_well_formed() {
     // per-event counters AND that per-command entries carry auto_tuning too.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("autotune-json");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     let body = concat!(
         "{\"ts\":\"2026-06-05T10:00:00Z\",\"cmd\":\"grep\",\"args\":\"\",\"tokens_saved\":0,\"tokens_raw\":0,\"lines_raw\":0,\"lines_final\":0,\"truncated\":false,\"strategy\":\"passthrough\",\"exit_code\":1,\"duration_ms\":5,\"version\":\"0.1.10\",\"adaptive_event\":\"expand_tail_err\"}\n",
@@ -946,7 +948,7 @@ fn auto_tuning_json_block_is_well_formed() {
 
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -988,7 +990,7 @@ fn auto_tuning_handles_backcompat_mixed_old_and_new_records() {
     // count only the new tagged rows in firings, (c) never panic.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("autotune-backcompat");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     let body = concat!(
         // OLD records — no adaptive_event field at all.
@@ -1002,7 +1004,7 @@ fn auto_tuning_handles_backcompat_mixed_old_and_new_records() {
 
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1041,7 +1043,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     for _ in 0..3 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
@@ -1049,7 +1051,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     // Run 4: 3 prior truncated → decay_moderate fires, 30→24, saved.
     let r4 = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "--no-squelch", "seq", "1", "200"])
         .output()
         .unwrap();
@@ -1062,7 +1064,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     // Run 5: cached (24,24) → decay_moderate (still 3-4 priors) → 24*0.8=19.
     let r5 = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "--no-squelch", "seq", "1", "200"])
         .output()
         .unwrap();
@@ -1075,7 +1077,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     // Run 6: cached (19,19), 5 priors → decay_strong → 19*0.6=11.
     let r6 = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "--no-squelch", "seq", "1", "200"])
         .output()
         .unwrap();
@@ -1086,7 +1088,7 @@ fn step5_persistence_compounds_decay_across_runs() {
     );
 
     // The tuned.jsonl sidecar must carry the bucket's tune.
-    let tuned = xdg.join("l0-cache").join("tuned.jsonl");
+    let tuned = xdg.join("l0-compressor").join("tuned.jsonl");
     assert!(tuned.exists(), "tuned.jsonl should exist at {tuned:?}");
     let body = std::fs::read_to_string(&tuned).unwrap();
     // At least one record must show head=11 (the most-recent compound).
@@ -1111,7 +1113,7 @@ fn step5_persistence_bucket_isolation_via_args_hash() {
     for _ in 0..4 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "--no-squelch", "seq", "1", "200"])
             .output()
             .unwrap();
@@ -1121,7 +1123,7 @@ fn step5_persistence_bucket_isolation_via_args_hash() {
     // means it must start from system defaults (30, 30).
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "--no-squelch", "seq", "1", "300"])
         .output()
         .unwrap();
@@ -1133,7 +1135,7 @@ fn step5_persistence_bucket_isolation_via_args_hash() {
 
     // tuned.jsonl should carry bucket A's tune; bucket B isn't persisted
     // because it didn't fire any rule.
-    let tuned = std::fs::read_to_string(xdg.join("l0-cache").join("tuned.jsonl")).unwrap();
+    let tuned = std::fs::read_to_string(xdg.join("l0-compressor").join("tuned.jsonl")).unwrap();
     // Bucket B's args_hash should NOT appear (no firing → no persistence).
     let mut a_count = 0;
     let mut b_count = 0;
@@ -1173,7 +1175,7 @@ fn step4_decay_steady_fires_on_seeded_mixed_window() {
     // decay_steady catches the steady-state pattern.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("step4-steady");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
 
     let args_hash = {
@@ -1202,7 +1204,7 @@ fn step4_decay_steady_fires_on_seeded_mixed_window() {
     // instead so the args_hash actually matches what main computes.
     let _ = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "cat", "hi"])
         .output()
         .unwrap();
@@ -1217,7 +1219,7 @@ fn step4_decay_steady_fires_on_seeded_mixed_window() {
     // --stats counts the firing under the right event.
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1236,12 +1238,12 @@ fn step3_proactive_shrink_fires_on_seeded_clean_history() {
     // carries the new event.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("step3-shrink");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
 
     // Compute the args_hash for the args we will use below so the seeded
     // history matches the next run's bucket. The args string is built by
-    // cmd_args_string, which for `l0-cache echo hi` is `"hi"`.
+    // cmd_args_string, which for `l0-compressor echo hi` is `"hi"`.
     let args_hash = {
         // FNV-1a 64-bit, low 32 bits as 8 hex chars — must match production.
         let mut h: u64 = 0xcbf29ce484222325;
@@ -1263,7 +1265,7 @@ fn step3_proactive_shrink_fires_on_seeded_clean_history() {
     // Real run with the matching bucket.
     let _ = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "echo", "hi"])
         .output()
         .unwrap();
@@ -1280,7 +1282,7 @@ fn step3_proactive_shrink_fires_on_seeded_clean_history() {
     // --stats surfaces it under the new event row.
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1296,7 +1298,7 @@ fn step3_does_not_fire_with_short_history() {
     // 5 clean records — below MIN=20 → no event.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("step3-short");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     let args_hash = {
         let mut h: u64 = 0xcbf29ce484222325;
@@ -1315,7 +1317,7 @@ fn step3_does_not_fire_with_short_history() {
     std::fs::write(dir.join("metrics.jsonl"), body).unwrap();
     let _ = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "echo", "hi"])
         .output()
         .unwrap();
@@ -1337,18 +1339,18 @@ fn step2_args_hash_lands_in_jsonl_per_run() {
 
     let _ = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "sh", "-c", "echo one"])
         .output()
         .unwrap();
     let _ = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "sh", "-c", "echo two"])
         .output()
         .unwrap();
 
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let body = std::fs::read_to_string(&metrics).expect("metrics exist");
     let mut hashes: Vec<String> = Vec::new();
     for line in body.lines() {
@@ -1379,7 +1381,7 @@ fn step2_bucket_isolates_failure_streak_across_distinct_args() {
     for _ in 0..3 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
             .output()
             .unwrap();
@@ -1389,7 +1391,7 @@ fn step2_bucket_isolates_failure_streak_across_distinct_args() {
     // warning on stderr, because bucket B's history is empty.
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--auto", "sh", "-c", "seq 1 50; exit 1"])
         .output()
         .unwrap();
@@ -1402,7 +1404,7 @@ fn step2_bucket_isolates_failure_streak_across_distinct_args() {
     // JSONL records show two DISTINCT args_hash values. (cmd_name extracts
     // the first word from `sh -c "<cmd> …"`, so both bucket A and B end up
     // with cmd="seq" — that's fine; bucketing is by args_hash, not cmd.)
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let body = std::fs::read_to_string(&metrics).expect("metrics exist");
     let mut hashes = std::collections::HashSet::new();
     for line in body.lines() {
@@ -1430,12 +1432,12 @@ fn step2_same_args_keeps_same_bucket_and_still_fires() {
     for _ in 0..3 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
             .output()
             .unwrap();
     }
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let body = std::fs::read_to_string(&metrics).expect("metrics exist");
     assert!(
         body.contains("\"adaptive_event\":\"expand_tail_err\""),
@@ -1460,7 +1462,7 @@ fn step2_backcompat_pre_step2_records_dont_break_aggregation() {
     // and never panic — the args_hash bucketing is invisible at this layer.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("step2-backcompat");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     let body = concat!(
         // OLD: no args_hash, no adaptive_event.
@@ -1473,7 +1475,7 @@ fn step2_backcompat_pre_step2_records_dont_break_aggregation() {
 
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1502,7 +1504,7 @@ fn auto_tuning_step1_skips_expand_on_empty_failures() {
     for _ in 0..4 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "false"])
             .output()
             .unwrap();
@@ -1510,7 +1512,7 @@ fn auto_tuning_step1_skips_expand_on_empty_failures() {
 
     // No metric in the JSONL must carry an adaptive_event tag — the rule
     // never fired because every history entry is noisy.
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let body = std::fs::read_to_string(&metrics).expect("metrics exist");
     assert!(
         !body.contains("\"adaptive_event\""),
@@ -1520,7 +1522,7 @@ fn auto_tuning_step1_skips_expand_on_empty_failures() {
     // --stats --json: auto_tuning.firings == 0, noisy == 0.
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1546,13 +1548,13 @@ fn auto_tuning_step1_still_fires_on_real_failures_with_output() {
     for _ in 0..3 {
         let _ = Command::new(&t_bin)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["--auto", "sh", "-c", "seq 1 200; exit 1"])
             .output()
             .unwrap();
     }
 
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let body = std::fs::read_to_string(&metrics).expect("metrics exist");
     assert!(
         body.contains("\"adaptive_event\":\"expand_tail_err\""),
@@ -1561,7 +1563,7 @@ fn auto_tuning_step1_still_fires_on_real_failures_with_output() {
 
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1586,7 +1588,7 @@ fn auto_tuning_noisy_counter_only_marks_empty_failure_expansions() {
     // runs that DID produce output are not noisy either.
     let t_bin = get_t_bin();
     let xdg = temp_xdg("autotune-noisy");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     let body = concat!(
         // NOISY: expand_tail_err + exit!=0 + lines_raw==0.
@@ -1604,7 +1606,7 @@ fn auto_tuning_noisy_counter_only_marks_empty_failure_expansions() {
 
     let out = Command::new(&t_bin)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--stats", "--json"])
         .output()
         .unwrap();
@@ -1626,31 +1628,31 @@ fn auto_tuning_noisy_counter_only_marks_empty_failure_expansions() {
 
 // ── Review-driven coverage: behaviors changed in the audit remediation ──────
 
-/// L0_CACHE_NO_TELEMETRY=1 must suppress every telemetry write; a falsy value
+/// L0_COMPRESSOR_NO_TELEMETRY=1 must suppress every telemetry write; a falsy value
 /// must not.
 #[test]
 fn no_telemetry_env_suppresses_all_writes() {
     let t = get_t_bin();
     let xdg = temp_xdg("no-telemetry");
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
 
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
-        .env("L0_CACHE_NO_TELEMETRY", "1")
+        .env("L0_COMPRESSOR_GUARD", "0")
+        .env("L0_COMPRESSOR_NO_TELEMETRY", "1")
         .args(["echo", "silent"])
         .output()
         .unwrap();
     assert!(out.status.success());
     assert!(
         !metrics.exists(),
-        "metric written despite L0_CACHE_NO_TELEMETRY=1"
+        "metric written despite L0_COMPRESSOR_NO_TELEMETRY=1"
     );
 
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
-        .env("L0_CACHE_NO_TELEMETRY", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
+        .env("L0_COMPRESSOR_NO_TELEMETRY", "0")
         .args(["echo", "recorded"])
         .output()
         .unwrap();
@@ -1667,7 +1669,7 @@ fn unknown_leading_flag_rejected_without_metric() {
     let xdg = temp_xdg("bogus-flag");
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--bogus-flag", "echo", "hi"])
         .output()
         .unwrap();
@@ -1678,7 +1680,7 @@ fn unknown_leading_flag_rejected_without_metric() {
         "stderr: {stderr}"
     );
     assert!(
-        !xdg.join("l0-cache").join("metrics.jsonl").exists(),
+        !xdg.join("l0-compressor").join("metrics.jsonl").exists(),
         "no metric may be written for a rejected invocation"
     );
     let _ = std::fs::remove_dir_all(&xdg);
@@ -1709,14 +1711,14 @@ fn invalid_since_is_an_error_in_stats_mode() {
     // Run mode: invalid value errors too; valid-but-ineffective warns.
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--since", "7D", "echo", "hi"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "invalid --since in run mode");
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["--since", "7d", "echo", "hi"])
         .output()
         .unwrap();
@@ -1735,7 +1737,7 @@ fn invalid_since_is_an_error_in_stats_mode() {
 fn reset_stats_deletes_metrics_and_tuned() {
     let t = get_t_bin();
     let xdg = temp_xdg("reset-both");
-    let dir = xdg.join("l0-cache");
+    let dir = xdg.join("l0-compressor");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("metrics.jsonl"), "{}\n").unwrap();
     std::fs::write(dir.join("tuned.jsonl"), "{}\n").unwrap();
@@ -1771,7 +1773,7 @@ fn recovery_restores_base_through_main_wiring() {
     let run = || {
         Command::new(&t)
             .env("XDG_DATA_HOME", &xdg)
-            .env("L0_CACHE_GUARD", "0")
+            .env("L0_COMPRESSOR_GUARD", "0")
             .args(["cat", file.to_str().unwrap()])
             .output()
             .unwrap()
@@ -1782,7 +1784,7 @@ fn recovery_restores_base_through_main_wiring() {
     for _ in 0..7 {
         assert!(run().status.success());
     }
-    let tuned_path = xdg.join("l0-cache").join("tuned.jsonl");
+    let tuned_path = xdg.join("l0-compressor").join("tuned.jsonl");
     let tuned = std::fs::read_to_string(&tuned_path).unwrap();
     assert!(
         tuned.contains("decay"),
@@ -1816,12 +1818,12 @@ fn isolated_run_writes_metric_into_its_own_xdg() {
     let xdg = temp_xdg("isolation-pin");
     let out = Command::new(&t)
         .env("XDG_DATA_HOME", &xdg)
-        .env("L0_CACHE_GUARD", "0")
+        .env("L0_COMPRESSOR_GUARD", "0")
         .args(["sh", "-c", "exit 42"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(42));
-    let metrics = xdg.join("l0-cache").join("metrics.jsonl");
+    let metrics = xdg.join("l0-compressor").join("metrics.jsonl");
     let content = std::fs::read_to_string(&metrics).expect("metric must land in the temp xdg");
     assert!(content.contains("\"cmd\":\"exit\""));
     assert!(content.contains("\"args\":\"42\""), "inner args: {content}");
@@ -1853,13 +1855,13 @@ fn hook_wrapper_skips_builtins_and_wraps_commands() {
     let dir = temp_xdg("hook-wrapper");
     let wrapper = dir.join("wrapper.sh");
     std::fs::write(&wrapper, wrapper_body.trim_start()).unwrap();
-    // Toggle file + PATH with the freshly built binary visible as `l0-cache`.
+    // Toggle file + PATH with the freshly built binary visible as `l0-compressor`.
     let cfg = dir.join("config");
-    std::fs::create_dir_all(cfg.join("l0-cache")).unwrap();
-    std::fs::write(cfg.join("l0-cache").join("hook.enabled"), "").unwrap();
+    std::fs::create_dir_all(cfg.join("l0-compressor")).unwrap();
+    std::fs::write(cfg.join("l0-compressor").join("hook.enabled"), "").unwrap();
     let bin_dir = dir.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
-    std::fs::copy(&t, bin_dir.join("l0-cache")).unwrap();
+    std::fs::copy(&t, bin_dir.join("l0-compressor")).unwrap();
     let path_env = format!(
         "{}:{}",
         bin_dir.display(),
@@ -1896,7 +1898,7 @@ fn hook_wrapper_skips_builtins_and_wraps_commands() {
     }
     let out = run_hook("seq 1 100");
     assert!(
-        out.contains("l0-cache --quiet --recover seq 1 100"),
+        out.contains("l0-compressor --quiet --recover seq 1 100"),
         "real command must be wrapped, got: {out}"
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -178,7 +178,7 @@ impl Recovery {
         }
         let mut w = self.file.take()?; // None => never crossed threshold => nothing to recover
         if self.capped {
-            let _ = w.write_all(b"... [l0-cache: recovery file capped] ...\n");
+            let _ = w.write_all(b"... [l0-compressor: recovery file capped] ...\n");
         }
         if w.flush().is_err() {
             let _ = fs::remove_file(&self.path);
@@ -193,7 +193,7 @@ impl Recovery {
     }
 }
 
-/// `<tmp>/l0-cache/recovery-<sanitized-cmd>-<pid>.log`. The PID keeps concurrent
+/// `<tmp>/l0-compressor/recovery-<sanitized-cmd>-<pid>.log`. The PID keeps concurrent
 /// runs of the same command (multi-agent setups, `make -j`, parallel CI) from
 /// colliding on — and corrupting — one shared file; within a single process the
 /// name is stable, so a process never accumulates more than one file per command.
@@ -214,7 +214,7 @@ fn recovery_path(cmd_label: &str) -> PathBuf {
     } else {
         safe
     };
-    std::env::temp_dir().join("l0-cache").join(format!(
+    std::env::temp_dir().join("l0-compressor").join(format!(
         "recovery-{}-{}.log",
         safe,
         std::process::id()
@@ -235,7 +235,7 @@ mod tests {
         use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
         let base = std::env::temp_dir().join(format!("l0-rec-sec-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
-        let dir = base.join("l0-cache");
+        let dir = base.join("l0-compressor");
         let path = dir.join("recovery-test.log");
 
         // Happy path: dir 0700, file 0600.
@@ -277,7 +277,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let base = std::env::temp_dir().join(format!("l0-rec-repair-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
-        let dir = base.join("l0-cache");
+        let dir = base.join("l0-compressor");
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         let path = dir.join("recovery-x.log");

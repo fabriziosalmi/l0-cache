@@ -53,7 +53,7 @@ jobs:
         run: cargo build --release
 
       - name: Smoke-run the release binary
-        run: ./target/release/l0-cache --no-auto echo "ci-smoke" | grep -q ci-smoke
+        run: ./target/release/l0-compressor --no-auto echo "ci-smoke" | grep -q ci-smoke
 
   msrv:
     name: Minimum Supported Rust (1.85)
@@ -90,8 +90,8 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Verify it is statically linked
         run: |
-          file target/x86_64-unknown-linux-musl/release/l0-cache
-          ldd target/x86_64-unknown-linux-musl/release/l0-cache || true
+          file target/x86_64-unknown-linux-musl/release/l0-compressor
+          ldd target/x86_64-unknown-linux-musl/release/l0-compressor || true
 
   security:
     name: Dependency Security Audit

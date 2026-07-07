@@ -1,7 +1,7 @@
-# l0-cache
+# l0-compressor
 
-[![CI](https://github.com/fabriziosalmi/l0-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/fabriziosalmi/l0-cache/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/fabriziosalmi/l0-cache?sort=semver&color=blue)](https://github.com/fabriziosalmi/l0-cache/releases/latest)
+[![CI](https://github.com/fabriziosalmi/l0-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/fabriziosalmi/l0-compressor/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/fabriziosalmi/l0-compressor?sort=semver&color=blue)](https://github.com/fabriziosalmi/l0-compressor/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![MSRV](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](Cargo.toml)
 
@@ -11,7 +11,7 @@ assistants (Claude Code, Gemini CLI, Cursor) running on macOS, Linux, and
 remote servers.
 
 <p align="center">
-  <img src="docs/public/screenshot.png" alt="l0-cache --stats telemetry dashboard" width="513">
+  <img src="docs/public/screenshot.png" alt="l0-compressor --stats telemetry dashboard" width="513">
 </p>
 
 ## The Problem
@@ -23,7 +23,7 @@ few lines (headers, command echo) and the last few lines (errors, summary).
 
 ## The Solution
 
-`l0-cache` wraps any command and applies a pipeline of universal filters:
+`l0-compressor` wraps any command and applies a pipeline of universal filters:
 
 ```
 command output
@@ -49,13 +49,13 @@ with `--no-squelch` or `squelch = false` in config.
 
 ## How it compares
 
-l0-cache is **universal-first**: it compresses *any* command's output with generic,
+l0-compressor is **universal-first**: it compresses *any* command's output with generic,
 format-aware filters instead of maintaining a parser per tool. That trades some
 best-case ratio on well-known commands for zero per-tool maintenance and instant
 support for unknown/proprietary CLIs. Where it stands apart is the *intelligence
 around* the filtering.
 
-| | l0-cache | [rtk](https://github.com/rtk-ai/rtk) | [snip](https://github.com/edouard-claude/snip) | Lean Ctx |
+| | l0-compressor | [rtk](https://github.com/rtk-ai/rtk) | [snip](https://github.com/edouard-claude/snip) | Lean Ctx |
 |---|---|---|---|---|
 | Filtering | universal + format-aware (head/tail, collapse, diff) | 100+ per-command parsers | 127 YAML filters | MCP server + cache |
 | Works on unknown/custom commands | ✅ | partial | partial | partial |
@@ -80,7 +80,7 @@ signal/process-group forwarding, OOM caps).
 **Where the others win:** deeper per-command semantic output (e.g. grouped test
 failures) and a longer list of pre-wired agents. For maximum ratio on a fixed set
 of known commands, rtk/snip go further; for a safe, adaptive, zero-maintenance proxy
-that works on *everything*, that's l0-cache.
+that works on *everything*, that's l0-compressor.
 
 ## Installation
 
@@ -90,14 +90,14 @@ Download a prebuilt binary for your platform (macOS arm64/x64, Linux x64) from t
 latest release and install it to `~/.local/bin/` (with the `t` alias):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install-binary.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/install-binary.sh | sh
 ```
 
 ### Homebrew (macOS / Linux)
 
 ```sh
-brew tap fabriziosalmi/l0-cache https://github.com/fabriziosalmi/l0-cache
-brew install l0-cache
+brew tap fabriziosalmi/l0-compressor https://github.com/fabriziosalmi/l0-compressor
+brew install l0-compressor
 ```
 
 ### From source (non-interactive)
@@ -105,7 +105,7 @@ brew install l0-cache
 Builds with Rust/Cargo and installs to `~/.local/bin/`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/install.sh | bash
 ```
 
 ### Interactive Installer
@@ -113,8 +113,8 @@ curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/insta
 Clone the repository and run the setup script for a guided interactive install:
 
 ```sh
-git clone https://github.com/fabriziosalmi/l0-cache.git
-cd l0-cache
+git clone https://github.com/fabriziosalmi/l0-compressor.git
+cd l0-compressor
 ./install.sh
 ```
 
@@ -122,49 +122,49 @@ cd l0-cache
 
 ```sh
 cargo build --release
-cp target/release/l0-cache /usr/local/bin/
+cp target/release/l0-compressor /usr/local/bin/
 ```
 
 ### Verify
 
 ```sh
-l0-cache --version
-# l0-cache 0.1.0 (abc1234)
+l0-compressor --version
+# l0-compressor 0.1.0 (abc1234)
 ```
 
 ## Usage
 
 ```sh
 # Filtered output (default: 30 head + 30 tail, threshold 100 lines)
-l0-cache cargo test
+l0-compressor cargo test
 
 # Full output, metrics still logged
-l0-cache --raw cargo test
+l0-compressor --raw cargo test
 
 # Interactive commands pass through unchanged
-l0-cache -i vim file.txt
+l0-compressor -i vim file.txt
 
 # Token savings report
-l0-cache --stats
-l0-cache --stats --since 7d
+l0-compressor --stats
+l0-compressor --stats --since 7d
 
 # Custom head/tail
-l0-cache --head 50 --tail 50 cargo build
+l0-compressor --head 50 --tail 50 cargo build
 
 # More tail lines on error (default: 120)
-l0-cache --tail-error 200 cargo test
+l0-compressor --tail-error 200 cargo test
 
 # Auto-tuning is enabled by default. To disable it:
-l0-cache --no-auto cargo test
+l0-compressor --no-auto cargo test
 
 # Diagnose system installation, shell configuration, and active LLM editors
-l0-cache --doctor
+l0-compressor --doctor
 
 # Custom success optimization floor and failure backoff ceiling
-l0-cache --auto-floor 15 --auto-ceiling 500 cargo test
+l0-compressor --auto-floor 15 --auto-ceiling 500 cargo test
 
 # Custom token divisor ratio (e.g. 8 bytes per token)
-l0-cache --token-factor 8 cargo test
+l0-compressor --token-factor 8 cargo test
 ```
 
 ## Options
@@ -185,7 +185,7 @@ l0-cache --token-factor 8 cargo test
 --idle-timeout N     SIGKILL the command (and its process group) after N seconds with
                      no output (prevents interactive-prompt deadlocks). 0 = off.
 --no-auto            Disable adaptive auto-tuning of parameters
---quiet, -q          Suppress l0-cache's own stderr notices (e.g. auto-tuning)
+--quiet, -q          Suppress l0-compressor's own stderr notices (e.g. auto-tuning)
 --guard              Force-enable the safety guard (see "Safety Guard" below)
 --no-guard           Force-disable the safety guard
 --doctor             Diagnose system installation, shell environment, and active LLM editors
@@ -204,13 +204,13 @@ l0-cache --token-factor 8 cargo test
 
 ## Telemetry Dashboard
 
-`l0-cache --stats` renders an aggregated savings report — total runs, tokens
+`l0-compressor --stats` renders an aggregated savings report — total runs, tokens
 saved, per-command efficiency with proportional bars, and an `AUTO-TUNING`
 section that reports per-event firing counts plus a `noisy` counter (failure
 expansions that fired on zero-output runs — the false-positive surface):
 
 ```
-┌─ l0-cache TELEMETRY ───────────────────────────────── last 7d ─┐
+┌─ l0-compressor TELEMETRY ───────────────────────────────── last 7d ─┐
 │ Runs        35                                                 │
 │ Saved       12.5k  of 17.4k raw · est. tokens                  │
 │ Efficiency   71.7%  █████████████████░░░░░░░                   │
@@ -271,7 +271,7 @@ found") does **not** grow the `expand_tail_err` streak — its failure mode is
 not the kind that extra error context would help with. The `noisy` counter
 in `--stats` tracks any past firings that did happen on such runs.
 
-Each firing is **persisted** to `$XDG_DATA_HOME/l0-cache/tuned.jsonl` keyed
+Each firing is **persisted** to `$XDG_DATA_HOME/l0-compressor/tuned.jsonl` keyed
 by `(cmd, args_hash)` (compacted on write: one line per bucket, 30-day TTL).
 The next run of the same bucket starts from the saved
 `(head, tail, tail_error)` instead of the CLI defaults — so the decay rules
@@ -284,7 +284,7 @@ degrades silently to the no-persistence behavior.
 
 There is no config file by default. When you want different head/tail budgets per
 command — without per-tool parsers — drop a small file in
-`$XDG_CONFIG_HOME/l0-cache/` (or `~/.config/l0-cache/`). l0-cache auto-detects
+`$XDG_CONFIG_HOME/l0-compressor/` (or `~/.config/l0-compressor/`). l0-compressor auto-detects
 `config.{json,toml,yaml,yml,conf,ini}` — **transparent multi-format, zero extra
 dependencies** (JSON is parsed by serde; TOML/YAML/INI share a tiny flat parser):
 
@@ -311,12 +311,12 @@ formats skip unparseable lines), never fatal.
 
 ## Claude Code Integration (optional)
 
-Normally you (or your AI assistant) prefix a command with `l0-cache` explicitly.
+Normally you (or your AI assistant) prefix a command with `l0-compressor` explicitly.
 For [Claude Code](https://claude.com/claude-code), the bundled `claude-hook.sh`
 can do that **for you, transparently**: it installs a
 [`PreToolUse`](https://docs.claude.com/en/docs/claude-code/hooks) hook that
 rewrites the *simple* Bash commands Claude Code runs so they go through
-`l0-cache` — the model never has to prefix anything.
+`l0-compressor` — the model never has to prefix anything.
 
 It is **off by default** and designed to stay out of the way:
 
@@ -326,7 +326,7 @@ It is **off by default** and designed to stay out of the way:
   `eval`, `exec`, `set`, …), shell constructs (`for`/`while`/`if`/`case`), or
   interactive/TUI/REPL programs (`vim`, `less`, `ssh`, `python`, `psql`, …) is
   passed through **untouched**. Already-wrapped commands are left as-is.
-- **Fail-safe** — if `l0-cache` or `jq` is missing, or anything errors, the
+- **Fail-safe** — if `l0-compressor` or `jq` is missing, or anything errors, the
   command runs unchanged. The hook never blocks a command and never sets a
   `permissionDecision`, so wrapped commands still go through your normal
   Claude Code permissions.
@@ -336,15 +336,15 @@ It is **off by default** and designed to stay out of the way:
 ./claude-hook.sh install     # write the wrapper + register the hook (idempotent; needs jq)
 ./claude-hook.sh enable      # turn it ON  (instant)
 ./claude-hook.sh disable     # turn it OFF (instant)
-./claude-hook.sh status      # show install/enabled state + l0-cache version
+./claude-hook.sh status      # show install/enabled state + l0-compressor version
 ./claude-hook.sh uninstall   # remove the hook registration and wrapper
 ```
 
-> **Installed via Homebrew?** The same script ships as the `l0-cache-claude-hook`
+> **Installed via Homebrew?** The same script ships as the `l0-compressor-claude-hook`
 > command — use it instead of `./claude-hook.sh` (no clone needed):
 >
 > ```sh
-> l0-cache-claude-hook install && l0-cache-claude-hook enable
+> l0-compressor-claude-hook install && l0-compressor-claude-hook enable
 > ```
 
 > **Activation:** after `install` (or any change to `settings.json`), start a
@@ -353,13 +353,13 @@ It is **off by default** and designed to stay out of the way:
 
 The hook honors `$CLAUDE_CONFIG_DIR` and `$XDG_CONFIG_HOME`. It edits Claude
 Code's `settings.json` (saving a timestamped backup) and stores its on/off state
-as an empty toggle file at `~/.config/l0-cache/hook.enabled`.
+as an empty toggle file at `~/.config/l0-compressor/hook.enabled`.
 
 > [!NOTE]
-> `l0-cache` is not a persistent cache — it filters output on the fly and does
+> `l0-compressor` is not a persistent cache — it filters output on the fly and does
 > not store results to replay. The only thing written to disk is the metrics log
 > (see [Metrics](#metrics)). If a session shows no savings, the hook simply
-> never wrapped a command in it — confirm with `l0-cache --stats` and
+> never wrapped a command in it — confirm with `l0-compressor --stats` and
 > `./claude-hook.sh status`.
 
 ### Other agents (Gemini CLI)
@@ -375,19 +375,19 @@ conservative, fail-safe wrapper for either (it also enables `--recover`):
 ./agent-hook.sh status gemini
 ```
 
-> **Homebrew:** these ship as `l0-cache-agent-hook` and `l0-cache-agent-rules`
+> **Homebrew:** these ship as `l0-compressor-agent-hook` and `l0-compressor-agent-rules`
 > (same arguments), so no clone is needed.
 
 > **Cursor** and most other agents expose a hook that can only *allow/deny* a
 > command, not rewrite it, so they cannot be wrapped transparently. For those,
 > `agent-rules.sh install cursor|cline|copilot|codex` drops a project rule telling
-> the model to prefix noisy read-only commands with `l0-cache` (or
+> the model to prefix noisy read-only commands with `l0-compressor` (or
 > `agent-rules.sh print` to paste it anywhere). This is best-effort (model-dependent),
 > not a hard hook.
 
 ## Safety Guard
 
-When `l0-cache` detects it is running inside an AI coding assistant (Claude Code,
+When `l0-compressor` detects it is running inside an AI coding assistant (Claude Code,
 Gemini CLI, Cursor/VS Code terminals), it enables a **best-effort** guard that
 blocks a few obviously destructive commands before they run, exiting with code
 **126**:
@@ -398,9 +398,9 @@ blocks a few obviously destructive commands before they run, exiting with code
 - credential exfiltration (`curl`/`wget`/`nc`/`ssh` touching `id_rsa`, `.env`, `shadow`, …);
 - `DROP DATABASE` via `psql`/`mysql`/`sqlite3`/`sqlcmd`.
 
-Control it explicitly with `--guard` / `--no-guard`, or the `L0_CACHE_GUARD`
+Control it explicitly with `--guard` / `--no-guard`, or the `L0_COMPRESSOR_GUARD`
 environment variable (`1`/`true`/`on` to force on, `0`/`false`/`off` to force off).
-Precedence: `--no-guard` → `--guard` → `L0_CACHE_GUARD` → auto-detect.
+Precedence: `--no-guard` → `--guard` → `L0_COMPRESSOR_GUARD` → auto-detect.
 
 > This is a guard rail, not a sandbox. It pattern-matches argv and shell payloads
 > and can be bypassed by a determined caller — do not rely on it as a security
@@ -412,7 +412,7 @@ Single-threaded, synchronous design. Zero async. The only thread ever spawned is
 an optional output-inactivity watchdog, and only when `--idle-timeout` is set.
 
 ```
-l0-cache <command>
+l0-compressor <command>
   |
   +-- sh -c '<command> 2>&1'     # merge stderr into stdout
   |
@@ -439,18 +439,18 @@ l0-cache <command>
 
 ### Signal Handling
 
-- The captured child runs in its own process group. `l0-cache` installs SIGINT
+- The captured child runs in its own process group. `l0-compressor` installs SIGINT
   and SIGTERM handlers that **forward** the signal to that group, so Ctrl-C and a
   directed `kill <pid>` (or `timeout`, systemd, `docker stop`) terminate the whole
-  child subtree — not just the `sh` wrapper — and `l0-cache` then propagates the
+  child subtree — not just the `sh` wrapper — and `l0-compressor` then propagates the
   child's status.
-- SIGPIPE: ignored in `l0-cache`, BrokenPipe handled in code so metrics are logged
+- SIGPIPE: ignored in `l0-compressor`, BrokenPipe handled in code so metrics are logged
   before exit
 - Exit codes: POSIX 128+N convention for signal-killed children
 
 ## Metrics
 
-Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
+Each invocation logs a JSON line to `~/.local/share/l0-compressor/metrics.jsonl`:
 
 ```json
 {
@@ -479,10 +479,10 @@ Each invocation logs a JSON line to `~/.local/share/l0-cache/metrics.jsonl`:
 records parse cleanly without them.
 
 The adaptive learner also reads/writes a small sidecar at
-`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per `(cmd, args_hash)`
+`$XDG_DATA_HOME/l0-compressor/tuned.jsonl` — one JSON line per `(cmd, args_hash)`
 bucket, compacted on write. See [Adaptive auto-tuning](#adaptive-auto-tuning).
 
-Data directory resolution: `$XDG_DATA_HOME/l0-cache/` then `$HOME/.local/share/l0-cache/`
+Data directory resolution: `$XDG_DATA_HOME/l0-compressor/` then `$HOME/.local/share/l0-compressor/`
 then `/etc/passwd` lookup (for containers, cron, systemd).
 
 File permissions are set to 0600. `metrics.jsonl` auto-rotates at 10 MB
@@ -524,27 +524,27 @@ make deploy-alpine HOST=user@alpine-host
 
 ```sh
 # Bash
-l0-cache --completions bash > /etc/bash_completion.d/l0-cache
+l0-compressor --completions bash > /etc/bash_completion.d/l0-compressor
 
 # Zsh
-l0-cache --completions zsh > ~/.zsh/completions/_l0-cache
+l0-compressor --completions zsh > ~/.zsh/completions/_l0-compressor
 
 # Fish
-l0-cache --completions fish > ~/.config/fish/completions/l0-cache.fish
+l0-compressor --completions fish > ~/.config/fish/completions/l0-compressor.fish
 ```
 
 ## Known Limitations
 
-- **SSH without PTY**: when running `ssh host l0-cache cargo build` (no `-t` flag),
-  Ctrl-C may not reach the child process. Use `ssh -t host l0-cache cargo build`
+- **SSH without PTY**: when running `ssh host l0-compressor cargo build` (no `-t` flag),
+  Ctrl-C may not reach the child process. Use `ssh -t host l0-compressor cargo build`
   instead.
 
 - **Binary output**: detected on the first 8 KB. If a command produces text
   followed by binary data after 8 KB, the binary portion is processed as text
   (with UTF-8 lossy conversion).
 
-- **Shell requirement**: `l0-cache` requires `/bin/sh` or `/usr/bin/sh` for the
-  `2>&1` merge. In distroless containers without a shell, use `l0-cache -i` for
+- **Shell requirement**: `l0-compressor` requires `/bin/sh` or `/usr/bin/sh` for the
+  `2>&1` merge. In distroless containers without a shell, use `l0-compressor -i` for
   passthrough mode (no stderr merge, no filtering).
 
 ## Hardening

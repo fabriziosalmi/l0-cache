@@ -1,6 +1,6 @@
 //! Build script: embed git commit hash into the binary for `--version`.
 //!
-//! Produces: `l0-cache 0.1.0 (abc1234)` instead of `l0-cache 0.1.0`.
+//! Produces: `l0-compressor 0.1.0 (abc1234)` instead of `l0-compressor 0.1.0`.
 //! Falls back gracefully if git is not available (containers, tarballs).
 
 use std::process::Command;
@@ -27,5 +27,8 @@ fn main() {
 
     let suffix = if git_dirty { "-dirty" } else { "" };
 
-    println!("cargo:rustc-env=L0_CACHE_GIT_HASH={}{}", git_hash, suffix);
+    println!(
+        "cargo:rustc-env=L0_COMPRESSOR_GIT_HASH={}{}",
+        git_hash, suffix
+    );
 }

@@ -1,6 +1,6 @@
-# Contributing to l0-cache
+# Contributing to l0-compressor
 
-Thank you for your interest in contributing to `l0-cache`! We appreciate your help in making this project better.
+Thank you for your interest in contributing to `l0-compressor`! We appreciate your help in making this project better.
 
 Please follow these guidelines to set up your environment, run tests, and submit contributions.
 
@@ -15,8 +15,8 @@ Please follow these guidelines to set up your environment, run tests, and submit
 ### Cloning the Repository
 
 ```bash
-git clone https://github.com/fabriziosalmi/l0-cache.git
-cd l0-cache
+git clone https://github.com/fabriziosalmi/l0-compressor.git
+cd l0-compressor
 ```
 
 ### Building the Project

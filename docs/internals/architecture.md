@@ -2,13 +2,13 @@
 
 ## Overview
 
-`l0-cache` is a single-threaded, synchronous Rust binary. It spawns a child process
+`l0-compressor` is a single-threaded, synchronous Rust binary. It spawns a child process
 via `sh -c '<command> 2>&1'`, reads the merged output line by line, filters
 it through a streaming pipeline, and prints the result.
 
 ```
                     +---------------------+
-                    |  l0-cache (parent)  |
+                    |  l0-compressor (parent)  |
                     |                     |
   stdin (inherited) |  +---------------+  |  stdout
   ------------------->  | sh -c '..    |  +----------->

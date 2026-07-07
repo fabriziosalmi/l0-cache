@@ -3,7 +3,7 @@
 //!
 //! This is a guard rail, not a sandbox. It pattern-matches argv and shell `-c`
 //! payloads and can be bypassed by a determined caller (`--no-guard` /
-//! `L0_CACHE_GUARD=0`).
+//! `L0_COMPRESSOR_GUARD=0`).
 //!
 //! ## Recursive-removal coverage
 //!
@@ -49,7 +49,7 @@
 //! * symlinked or bind-mounted aliases of a protected path.
 //!
 //! A determined caller can still evade it; that is what `--no-guard` /
-//! `L0_CACHE_GUARD=0` are for. Treat it as a seatbelt against accidents (the
+//! `L0_COMPRESSOR_GUARD=0` are for. Treat it as a seatbelt against accidents (the
 //! LLM-agent `rm -rf ~` footgun), not a security boundary.
 
 /// Detects if the current process is running inside an active LLM editor environment.
@@ -69,7 +69,7 @@ pub(crate) fn is_llm_environment() -> bool {
     false
 }
 
-/// Parse a boolean-ish environment value, e.g. for `L0_CACHE_GUARD`.
+/// Parse a boolean-ish environment value, e.g. for `L0_COMPRESSOR_GUARD`.
 /// Returns `Some(true/false)` for recognized truthy/falsy values, `None` otherwise.
 pub(crate) fn parse_bool_env(val: &str) -> Option<bool> {
     match val.trim().to_lowercase().as_str() {
@@ -81,10 +81,13 @@ pub(crate) fn parse_bool_env(val: &str) -> Option<bool> {
 
 /// Single source of truth for whether the safety guard is active.
 ///
-/// Precedence: `--no-guard` → `--guard` → `L0_CACHE_GUARD` (truthy/falsy) →
+/// Precedence: `--no-guard` → `--guard` → `L0_COMPRESSOR_GUARD` (truthy/falsy) →
 /// LLM-environment auto-detect. Both the enforcement path (`main`) and the
 /// `--doctor` report call this, so they can never disagree (the previous code
-/// treated `L0_CACHE_GUARD=true` as "off" in enforcement but "on" in doctor).
+/// treated `L0_COMPRESSOR_GUARD=true` as "off" in enforcement but "on" in doctor).
+///
+/// The pre-rename `L0_CACHE_GUARD` name is still honored as a deprecated fallback
+/// so existing hooks/integrations keep working; remove at the next major.
 pub fn guard_enabled(force_on: bool, force_off: bool) -> bool {
     if force_off {
         return false;
@@ -92,7 +95,9 @@ pub fn guard_enabled(force_on: bool, force_off: bool) -> bool {
     if force_on {
         return true;
     }
-    if let Ok(val) = std::env::var("L0_CACHE_GUARD") {
+    if let Ok(val) =
+        std::env::var("L0_COMPRESSOR_GUARD").or_else(|_| std::env::var("L0_CACHE_GUARD"))
+    {
         if let Some(b) = parse_bool_env(&val) {
             return b;
         }
@@ -621,7 +626,7 @@ fn scan_shell_payload(payload: &str, protected: &[String], depth: u32) -> Result
 ///
 /// This is a best-effort lint, not a sandbox: it does not parse the shell grammar
 /// (command substitution, variable expansion) and can be bypassed by a determined
-/// caller. Bypass intentionally with `--no-guard` / `L0_CACHE_GUARD=0`.
+/// caller. Bypass intentionally with `--no-guard` / `L0_COMPRESSOR_GUARD=0`.
 pub fn check_dangerous_command(cmd_name: &str, command: &[String]) -> Result<(), String> {
     check_dangerous_command_with_homes(cmd_name, command, &resolved_home_dirs())
 }

@@ -49,7 +49,7 @@ Input:
 ```
   Compiling serde v1.0.1
   Compiling clap v4.0.0
-  Compiling l0-cache v0.1.0
+  Compiling l0-compressor v0.1.0
 ```
 
 Output:
@@ -140,11 +140,11 @@ command produces 100 lines or 10 million.
 
 The first ~8 KB of output are checked for null bytes **or** invalid UTF-8. If
 either is found, the output is classified as binary. Rather than forward a
-useless, token-expensive blob, `l0-cache` emits the sniffed first ~8 KB (lossy
+useless, token-expensive blob, `l0-compressor` emits the sniffed first ~8 KB (lossy
 UTF-8) and, when the stream was larger, an explicit banner:
 
 ```
-... [l0-cache: binary output detected — showing first 8192 of 1048576 bytes] ...
+... [l0-compressor: binary output detected — showing first 8192 of 1048576 bytes] ...
 ```
 
 The metric records `strategy: "binary_skip"` and `truncated: true` when bytes

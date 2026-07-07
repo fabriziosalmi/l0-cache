@@ -1,14 +1,14 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: 'l0-cache',
+  title: 'l0-compressor',
   description: 'Lightweight CLI proxy for LLM token savings',
-  base: '/l0-cache/',
+  base: '/l0-compressor/',
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/' },
       { text: 'Reference', link: '/reference/' },
-      { text: 'GitHub', link: 'https://github.com/fabriziosalmi/l0-cache' }
+      { text: 'GitHub', link: 'https://github.com/fabriziosalmi/l0-compressor' }
     ],
     sidebar: [
       {
@@ -40,7 +40,7 @@ export default defineConfig({
       }
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/fabriziosalmi/l0-cache' }
+      { icon: 'github', link: 'https://github.com/fabriziosalmi/l0-compressor' }
     ]
   }
 })

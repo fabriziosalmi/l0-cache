@@ -10,9 +10,9 @@ use clap_complete::Shell;
 /// Lightweight CLI proxy that reduces LLM token consumption.
 #[derive(Parser, Debug)]
 #[command(
-    name = "l0-cache",
+    name = "l0-compressor",
     version,
-    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("L0_CACHE_GIT_HASH"), ")"),
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("L0_COMPRESSOR_GIT_HASH"), ")"),
     about = "CLI proxy: filters & truncates command output to save LLM tokens",
     // `trailing_var_arg` is set on the `command` field below; everything after the
     // first non-flag token is the child command.

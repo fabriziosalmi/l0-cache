@@ -1,6 +1,6 @@
 # Introduction
 
-`l0-cache` is a lightweight CLI proxy that sits between your AI coding assistant and
+`l0-compressor` is a lightweight CLI proxy that sits between your AI coding assistant and
 shell commands. It filters, truncates, and compresses command output to reduce
 token consumption by 50-80%.
 
@@ -28,7 +28,7 @@ cargo test
 Run:
 
 ```sh
-l0-cache cargo test
+l0-compressor cargo test
 ```
 
 The output is filtered through a streaming pipeline:
