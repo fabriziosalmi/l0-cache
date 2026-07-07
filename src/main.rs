@@ -1,11 +1,11 @@
-//! `l0-cache` — Lightweight CLI proxy that reduces LLM token consumption.
+//! `l0-compressor` — Lightweight CLI proxy that reduces LLM token consumption.
 //!
 //! Usage:
-//!   l0-cache cargo test          # filtered output
-//!   l0-cache --raw cargo test    # full output, still logs metrics
-//!   l0-cache --stats             # show savings report
-//!   l0-cache --stats --since 7d  # last 7 days only
-//!   l0-cache -i vim file.txt     # force passthrough (interactive)
+//!   l0-compressor cargo test          # filtered output
+//!   l0-compressor --raw cargo test    # full output, still logs metrics
+//!   l0-compressor --stats             # show savings report
+//!   l0-compressor --stats --since 7d  # last 7 days only
+//!   l0-compressor -i vim file.txt     # force passthrough (interactive)
 
 mod args;
 mod config;
@@ -30,17 +30,22 @@ fn main() {
     // ── Shell completions ───────────────────────────────────────────────
     if let Some(shell) = args.completions {
         let mut cmd = <Args as clap::CommandFactory>::command();
-        clap_complete::generate(shell, &mut cmd, "l0-cache", &mut std::io::stdout());
+        clap_complete::generate(shell, &mut cmd, "l0-compressor", &mut std::io::stdout());
         std::process::exit(0);
     }
+
+    // ── One-time data-dir migration from the pre-rename `l0-cache/` location ──
+    // Best-effort and non-destructive; keeps a user's metrics/tuning across the
+    // rebrand. Runs before any telemetry read (--stats, --reset-stats, run mode).
+    telemetry::migrate_legacy_data_dir();
 
     // ── Reset stats mode ────────────────────────────────────────────────
     if args.reset_stats {
         if let Err(e) = telemetry::reset_stats() {
-            eprintln!("l0-cache: failed to reset stats: {}", e);
+            eprintln!("l0-compressor: failed to reset stats: {}", e);
             std::process::exit(1);
         }
-        println!("l0-cache: telemetry stats have been successfully reset.");
+        println!("l0-compressor: telemetry stats have been successfully reset.");
         std::process::exit(0);
     }
 
@@ -53,13 +58,15 @@ fn main() {
     if let Some(s) = since {
         if !telemetry::since_is_valid(s) {
             eprintln!(
-                "l0-cache: error: invalid --since value '{}' (expected <num><unit> with unit one of d/h/m/s, e.g. 7d, 24h, 30m)",
+                "l0-compressor: error: invalid --since value '{}' (expected <num><unit> with unit one of d/h/m/s, e.g. 7d, 24h, 30m)",
                 s
             );
             std::process::exit(2);
         }
         if !args.stats && !args.discover {
-            eprintln!("l0-cache: warning: --since has no effect without --stats or --discover");
+            eprintln!(
+                "l0-compressor: warning: --since has no effect without --stats or --discover"
+            );
         }
     }
 
@@ -83,9 +90,9 @@ fn main() {
 
     // ── No command provided ─────────────────────────────────────────────
     if args.command.is_empty() {
-        eprintln!("l0-cache: no command specified. Usage: l0-cache <command> [args...]");
-        eprintln!("   l0-cache --stats       show token savings report");
-        eprintln!("   l0-cache --help        show all options");
+        eprintln!("l0-compressor: no command specified. Usage: l0-compressor <command> [args...]");
+        eprintln!("   l0-compressor --stats       show token savings report");
+        eprintln!("   l0-compressor --help        show all options");
         std::process::exit(1);
     }
 
@@ -98,10 +105,10 @@ fn main() {
     if let Some(first) = args.command.first() {
         if first.starts_with('-') {
             eprintln!(
-                "l0-cache: error: unrecognized option '{}' (commands cannot start with '-')",
+                "l0-compressor: error: unrecognized option '{}' (commands cannot start with '-')",
                 first
             );
-            eprintln!("   l0-cache --help        show all options");
+            eprintln!("   l0-compressor --help        show all options");
             std::process::exit(2);
         }
     }
@@ -113,14 +120,14 @@ fn main() {
         if let Err(reason) = telemetry::check_dangerous_command(&args.cmd_name(), &args.command) {
             eprintln!("\x1b[31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
             eprintln!(
-                "\x1b[31;1m● l0-cache: GUARD BLOCKED A POTENTIALLY DESTRUCTIVE COMMAND\x1b[0m"
+                "\x1b[31;1m● l0-compressor: GUARD BLOCKED A POTENTIALLY DESTRUCTIVE COMMAND\x1b[0m"
             );
             eprintln!("\x1b[31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
             eprintln!("Reason: {}", reason);
             eprintln!(
                 "If this is intentional, bypass the guard using the \x1b[33m--no-guard\x1b[0m flag"
             );
-            eprintln!("or set the environment variable \x1b[33mL0_CACHE_GUARD=0\x1b[0m.");
+            eprintln!("or set the environment variable \x1b[33mL0_COMPRESSOR_GUARD=0\x1b[0m.");
             eprintln!("\x1b[31m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
             std::process::exit(126);
         }
@@ -131,7 +138,7 @@ fn main() {
     // receives them from the terminal. We wait for child.wait() to complete
     // and propagate its exit code. This prevents zombie processes.
     //
-    // SIGPIPE: Ignored so `l0-cache cmd | head` doesn't kill us before we can
+    // SIGPIPE: Ignored so `l0-compressor cmd | head` doesn't kill us before we can
     // log metrics. We handle BrokenPipe on stdout manually.
     install_signal_handlers();
 
@@ -140,7 +147,11 @@ fn main() {
         match runner::run_passthrough(&args.command) {
             Ok(code) => std::process::exit(code),
             Err(e) => {
-                eprintln!("l0-cache: failed to execute '{}': {}", args.cmd_name(), e);
+                eprintln!(
+                    "l0-compressor: failed to execute '{}': {}",
+                    args.cmd_name(),
+                    e
+                );
                 std::process::exit(exec_error_code(&e));
             }
         }
@@ -213,7 +224,7 @@ fn main() {
         if tuned.modified {
             if let Some(reason) = &tuned.reason {
                 if !args.quiet {
-                    eprintln!("l0-cache: auto-tuning: {}", reason);
+                    eprintln!("l0-compressor: auto-tuning: {}", reason);
                 }
             }
             head = tuned.head;
@@ -270,7 +281,7 @@ fn main() {
                     "\n"
                 };
                 let banner = format!(
-                    "{}\n... [l0-cache: exit_code={}, duration={}ms, truncated=true] ...\n... [Showing {} head + {} tail of {} lines] ...\n",
+                    "{}\n... [l0-compressor: exit_code={}, duration={}ms, truncated=true] ...\n... [Showing {} head + {} tail of {} lines] ...\n",
                     separator,
                     result.exit_code,
                     result.duration_ms,
@@ -284,7 +295,7 @@ fn main() {
                 // truncated run with --recover), so it can read the omitted lines.
                 if let Some(path) = &result.recovery_path {
                     output_to_write.push_str(&format!(
-                        "... [l0-cache: full output saved to {} — read it for the omitted lines] ...\n",
+                        "... [l0-compressor: full output saved to {} — read it for the omitted lines] ...\n",
                         path.display()
                     ));
                 }
@@ -321,7 +332,11 @@ fn main() {
             std::process::exit(result.exit_code);
         }
         Err(e) => {
-            eprintln!("l0-cache: failed to execute '{}': {}", args.cmd_name(), e);
+            eprintln!(
+                "l0-compressor: failed to execute '{}': {}",
+                args.cmd_name(),
+                e
+            );
             std::process::exit(exec_error_code(&e));
         }
     }
@@ -363,7 +378,7 @@ fn write_output(output: &str) -> std::io::Result<()> {
 ///
 /// Because the captured child runs in its OWN process group, the controlling
 /// terminal no longer delivers SIGINT directly to it — the parent must forward.
-/// This also fixes a directed `kill <l0-cache-pid>` (SIGTERM), which the old
+/// This also fixes a directed `kill <l0-compressor-pid>` (SIGTERM), which the old
 /// `SIG_IGN` swallowed while the child kept running and `child.wait()` blocked.
 #[cfg(unix)]
 extern "C" fn forward_signal(sig: libc::c_int) {
@@ -374,7 +389,7 @@ extern "C" fn forward_signal(sig: libc::c_int) {
             libc::kill(-pgid, sig);
         }
     }
-    // If no child is running (pgid == 0) we deliberately no-op: l0-cache itself
+    // If no child is running (pgid == 0) we deliberately no-op: l0-compressor itself
     // is mid-spawn or finishing up and should not be torn down here.
 }
 

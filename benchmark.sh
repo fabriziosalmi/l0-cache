@@ -1,12 +1,12 @@
 #!/bin/bash
-# benchmark.sh — measure l0-cache token savings on a noisy command
+# benchmark.sh — measure l0-compressor token savings on a noisy command
 # (5000 identical INFO lines + 100 unique ERRORs, exit 1).
 set -u
 
-BIN="./target/release/l0-cache"
-[ -x "$BIN" ] || BIN="./target/debug/l0-cache"
+BIN="./target/release/l0-compressor"
+[ -x "$BIN" ] || BIN="./target/debug/l0-compressor"
 if [ ! -x "$BIN" ]; then
-    echo "l0-cache binary not found — run 'cargo build --release' first." >&2
+    echo "l0-compressor binary not found — run 'cargo build --release' first." >&2
     exit 1
 fi
 
@@ -23,7 +23,7 @@ boxtop() { printf '%s┌%s┐%s\n' "$C_FAINT" "$(rule 64 ─)" "$C_0"; }
 boxbot() { printf '%s└%s┘%s\n' "$C_FAINT" "$(rule 64 ─)" "$C_0"; }
 boxrow() { printf '%s│%s %-62s %s│%s\n' "$C_FAINT" "$C_0" "$1" "$C_FAINT" "$C_0"; }
 
-# tokens ≈ bytes / 4 (l0-cache's default --token-factor), formatted k/M.
+# tokens ≈ bytes / 4 (l0-compressor's default --token-factor), formatted k/M.
 humantok() { awk -v n="$1" 'BEGIN{ if(n>=1000000) printf "~%.1fM", n/1000000; else if(n>=1000) printf "~%.1fk", n/1000; else printf "~%d", n }'; }
 humansize() { awk -v n="$1" 'BEGIN{ if(n>=1048576) printf "%.1fM", n/1048576; else if(n>=1024) printf "%.1fK", n/1024; else printf "%dB", n }'; }
 reduction() { awk -v a="$1" -v b="$2" 'BEGIN{ if(b<=0){printf "—"} else printf "%.1f%%", (1-a/b)*100 }'; }
@@ -31,7 +31,7 @@ reduction() { awk -v a="$1" -v b="$2" 'BEGIN{ if(b<=0){printf "—"} else printf
 # ── Mock noisy tool ──────────────────────────────────────────────────────────
 mock=$(mktemp)
 # Lines lead with the counter so they don't share a collapsible prefix — this
-# exercises l0-cache's head/tail truncation (the headline feature) rather than
+# exercises l0-compressor's head/tail truncation (the headline feature) rather than
 # its identical-line collapser, which would otherwise reduce everything to 2 lines.
 cat > "$mock" <<'EOF'
 #!/bin/bash
@@ -49,7 +49,7 @@ work=$(mktemp -d)
 export XDG_DATA_HOME="$work/data"   # isolate auto-tuning history
 
 boxtop
-boxrow "${C_B}l0-cache benchmark${C_0}"
+boxrow "${C_B}l0-compressor benchmark${C_0}"
 boxrow "${C_DIM}5000 INFO + 100 ERROR log lines, exits 1${C_0}"
 boxbot
 echo
@@ -64,15 +64,15 @@ run() { # $1 = output file, $2... = command
     R_TOK=$((R_BYTES / 4))
 }
 
-printf '  %srunning baseline (no l0-cache)…%s\n' "$C_DIM" "$C_0"
+printf '  %srunning baseline (no l0-compressor)…%s\n' "$C_DIM" "$C_0"
 run "$work/native" "$mock"
 b_lines=$R_LINES; b_size=$R_SIZE; b_tok=$R_TOK
 
-printf '  %srunning l0-cache --no-auto…%s\n' "$C_DIM" "$C_0"
+printf '  %srunning l0-compressor --no-auto…%s\n' "$C_DIM" "$C_0"
 run "$work/no_auto" "$BIN" --no-auto "$mock"
 n_lines=$R_LINES; n_size=$R_SIZE; n_tok=$R_TOK
 
-printf '  %srunning l0-cache --auto (3× to trip failure backoff)…%s\n' "$C_DIM" "$C_0"
+printf '  %srunning l0-compressor --auto (3× to trip failure backoff)…%s\n' "$C_DIM" "$C_0"
 "$BIN" --auto "$mock" > /dev/null 2>&1
 "$BIN" --auto "$mock" > /dev/null 2>&1
 run "$work/auto" "$BIN" --auto "$mock"
@@ -83,8 +83,8 @@ echo
 printf '  %s%-22s %8s %9s %11s %11s%s\n' "$C_DIM" "MODE" "LINES" "SIZE" "~TOKENS" "REDUCTION" "$C_0"
 printf '  %s%s%s\n' "$C_FAINT" "$(rule 64 ─)" "$C_0"
 printf '  %-22s %8s %9s %11s %11s\n' "baseline" "$b_lines" "$b_size" "$(humantok "$b_tok")" "—"
-printf '  %-22s %8s %9s %11s %s%11s%s\n' "l0-cache --no-auto" "$n_lines" "$n_size" "$(humantok "$n_tok")" "$C_GR" "$(reduction "$n_tok" "$b_tok")" "$C_0"
-printf '  %-22s %8s %9s %11s %s%11s%s\n' "l0-cache --auto" "$a_lines" "$a_size" "$(humantok "$a_tok")" "$C_GR" "$(reduction "$a_tok" "$b_tok")" "$C_0"
+printf '  %-22s %8s %9s %11s %s%11s%s\n' "l0-compressor --no-auto" "$n_lines" "$n_size" "$(humantok "$n_tok")" "$C_GR" "$(reduction "$n_tok" "$b_tok")" "$C_0"
+printf '  %-22s %8s %9s %11s %s%11s%s\n' "l0-compressor --auto" "$a_lines" "$a_size" "$(humantok "$a_tok")" "$C_GR" "$(reduction "$a_tok" "$b_tok")" "$C_0"
 echo
 printf '  %s●%s best reduction: %s--no-auto%s (%s fewer tokens vs baseline)\n' \
     "$C_CY" "$C_0" "$C_B" "$C_0" "$(reduction "$n_tok" "$b_tok")"

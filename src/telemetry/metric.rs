@@ -1,6 +1,6 @@
 //! Execution-metric model and the metrics-log append path.
 //!
-//! One JSONL line per execution to `~/.local/share/l0-cache/metrics.jsonl`,
+//! One JSONL line per execution to `~/.local/share/l0-compressor/metrics.jsonl`,
 //! `O_APPEND` for atomic concurrent writes. Never fails the wrapped command.
 
 use super::*;
@@ -117,12 +117,14 @@ pub fn reset_stats() -> std::io::Result<()> {
 /// Maximum metrics file size before rotation (10MB).
 const METRICS_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Whether telemetry writes are disabled via `L0_CACHE_NO_TELEMETRY` (truthy
+/// Whether telemetry writes are disabled via `L0_COMPRESSOR_NO_TELEMETRY` (truthy
 /// values per `parse_bool_env`: 1/true/yes/on). Used by test harnesses and
 /// benchmark scripts so they never pollute the user's real metrics/tuning
-/// files, regardless of `XDG_DATA_HOME` isolation.
+/// files, regardless of `XDG_DATA_HOME` isolation. The pre-rename
+/// `L0_CACHE_NO_TELEMETRY` name is honored as a deprecated fallback.
 pub(crate) fn telemetry_disabled() -> bool {
-    std::env::var("L0_CACHE_NO_TELEMETRY")
+    std::env::var("L0_COMPRESSOR_NO_TELEMETRY")
+        .or_else(|_| std::env::var("L0_CACHE_NO_TELEMETRY"))
         .ok()
         .and_then(|v| super::guard::parse_bool_env(&v))
         .unwrap_or(false)
@@ -138,7 +140,7 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
         None => {
             if !quiet {
                 eprintln!(
-                    "l0-cache: warning: $HOME not set, cannot write metrics (common in containers/cron)"
+                    "l0-compressor: warning: $HOME not set, cannot write metrics (common in containers/cron)"
                 );
             }
             return;
@@ -150,7 +152,7 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
         if let Err(e) = fs::create_dir_all(parent) {
             if !quiet {
                 eprintln!(
-                    "l0-cache: warning: cannot create {}: {}",
+                    "l0-compressor: warning: cannot create {}: {}",
                     parent.display(),
                     e
                 );
@@ -236,7 +238,7 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
         Ok(s) => s,
         Err(e) => {
             if !quiet {
-                eprintln!("l0-cache: warning: cannot serialize metric: {}", e);
+                eprintln!("l0-compressor: warning: cannot serialize metric: {}", e);
             }
             return;
         }
@@ -266,7 +268,7 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
             if let Err(e) = file.write_all(line.as_bytes()) {
                 if !quiet {
                     eprintln!(
-                        "l0-cache: warning: cannot write to {}: {}",
+                        "l0-compressor: warning: cannot write to {}: {}",
                         path.display(),
                         e
                     );
@@ -275,7 +277,11 @@ pub fn append_metric(metric: &ExecutionMetric, quiet: bool) {
         }
         Err(e) => {
             if !quiet {
-                eprintln!("l0-cache: warning: cannot open {}: {}", path.display(), e);
+                eprintln!(
+                    "l0-compressor: warning: cannot open {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
     }

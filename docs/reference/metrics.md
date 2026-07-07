@@ -2,11 +2,11 @@
 
 ## File Location
 
-`$XDG_DATA_HOME/l0-cache/metrics.jsonl` or `~/.local/share/l0-cache/metrics.jsonl`.
+`$XDG_DATA_HOME/l0-compressor/metrics.jsonl` or `~/.local/share/l0-compressor/metrics.jsonl`.
 
 ## Format
 
-One JSON object per line (JSONL). Each line represents one `l0-cache` invocation.
+One JSON object per line (JSONL). Each line represents one `l0-compressor` invocation.
 
 ```json
 {
@@ -48,7 +48,7 @@ One JSON object per line (JSONL). Each line represents one `l0-cache` invocation
 | `strategy` | string | Filter strategy used |
 | `exit_code` | integer | Child process exit code |
 | `duration_ms` | integer | Wall-clock execution time in milliseconds |
-| `version` | string | Binary version of `l0-cache` |
+| `version` | string | Binary version of `l0-compressor` |
 | `adaptive_event` | string, optional | The adaptive-tuning rule that fired this run, if any (see [Strategy Values](#strategy-values) and below); absent (and `Option::None` in code) when no rule fired or `--no-auto` was passed |
 | `args_hash` | string, optional | 8-char FNV-1a 64-bit hash of `args`; the per-bucket key for the adaptive learner. Absent on pre-0.1.10 records |
 
@@ -110,7 +110,7 @@ reasonable approximation for English text with common LLM tokenizers
 ## Persistence sidecar (`tuned.jsonl`)
 
 Alongside `metrics.jsonl`, the adaptive learner reads and writes
-`$XDG_DATA_HOME/l0-cache/tuned.jsonl` — one JSON line per `(cmd, args_hash)`
+`$XDG_DATA_HOME/l0-compressor/tuned.jsonl` — one JSON line per `(cmd, args_hash)`
 bucket: the file is compacted on every write (latest entry per bucket;
 entries past the 30-day TTL, or with unparseable timestamps, are pruned).
 Schema:

@@ -2,14 +2,14 @@
 
 ## Basic Usage
 
-Prefix any command with `l0-cache`:
+Prefix any command with `l0-compressor`:
 
 ```sh
-l0-cache cargo test
-l0-cache npm run build
-l0-cache git log --oneline -50
-l0-cache docker compose logs
-l0-cache kubectl get pods -A
+l0-compressor cargo test
+l0-compressor npm run build
+l0-compressor git log --oneline -50
+l0-compressor docker compose logs
+l0-compressor kubectl get pods -A
 ```
 
 Output is automatically filtered. Lines beyond the head/tail window are
@@ -34,7 +34,7 @@ line 430
 When you need the complete output (but still want metrics logged):
 
 ```sh
-l0-cache --raw cargo test
+l0-compressor --raw cargo test
 ```
 
 ## Interactive Commands
@@ -43,7 +43,7 @@ Interactive commands (like `vim`, `htop`, and `ssh`) are automatically detected 
 passthrough mode. You can also force passthrough:
 
 ```sh
-l0-cache -i python3    # force interactive mode
+l0-compressor -i python3    # force interactive mode
 ```
 
 Auto-detected interactive commands: `vim`, `vi`, `nvim`, `nano`, `emacs`,
@@ -53,19 +53,19 @@ Auto-detected interactive commands: `vim`, `vi`, `nvim`, `nano`, `emacs`,
 
 ```sh
 # All time
-l0-cache --stats
+l0-compressor --stats
 
 # Last 7 days
-l0-cache --stats --since 7d
+l0-compressor --stats --since 7d
 
 # Last 24 hours
-l0-cache --stats --since 24h
+l0-compressor --stats --since 24h
 ```
 
 Example output (colors omitted):
 
 ```
-┌─ l0-cache TELEMETRY ───────────────────────────────── last 7d ─┐
+┌─ l0-compressor TELEMETRY ───────────────────────────────── last 7d ─┐
 │ Runs        35                                                 │
 │ Saved       12.5k  of 17.4k raw · est. tokens                  │
 │ Efficiency   71.7%  █████████████████░░░░░░░                   │
@@ -88,7 +88,7 @@ Example output (colors omitted):
 │   npm           1   E:1                                        │
 │   E=expand Dm/Ds/Dsy=decay P=shrink R=recover                  │
 └────────────────────────────────────────────────────────────────┘
-  metrics ~/.local/share/l0-cache/metrics.jsonl
+  metrics ~/.local/share/l0-compressor/metrics.jsonl
 ```
 
 Reading the dashboard:
@@ -118,8 +118,8 @@ traces are preserved in full.
 
 ```sh
 # Default: 120 tail lines on error
-l0-cache cargo test
+l0-compressor cargo test
 
 # Custom: 200 tail lines on error
-l0-cache --tail-error 200 cargo test
+l0-compressor --tail-error 200 cargo test
 ```

@@ -7,25 +7,25 @@ latest GitHub Release and install it to `~/.local/bin/` (with the `t` alias). Th
 script verifies the SHA-256 checksum:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install-binary.sh | sh
+curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/install-binary.sh | sh
 ```
 
-Override the install dir with `L0_CACHE_BIN_DIR`, or pin a version with
-`L0_CACHE_VERSION=v0.1.8`.
+Override the install dir with `L0_COMPRESSOR_BIN_DIR`, or pin a version with
+`L0_COMPRESSOR_VERSION=v0.1.8`.
 
 ## Homebrew (macOS / Linux)
 
 ```sh
-brew tap fabriziosalmi/l0-cache https://github.com/fabriziosalmi/l0-cache
-brew install l0-cache
+brew tap fabriziosalmi/l0-compressor https://github.com/fabriziosalmi/l0-compressor
+brew install l0-compressor
 ```
 
-This installs the `l0-cache` binary (and the `t` alias) plus the integration
-helpers — `l0-cache-claude-hook`, `l0-cache-agent-hook`, `l0-cache-agent-rules` —
+This installs the `l0-compressor` binary (and the `t` alias) plus the integration
+helpers — `l0-compressor-claude-hook`, `l0-compressor-agent-hook`, `l0-compressor-agent-rules` —
 so the transparent Claude Code / Gemini CLI hook works without cloning the repo:
 
 ```sh
-l0-cache-claude-hook install && l0-cache-claude-hook enable
+l0-compressor-claude-hook install && l0-compressor-claude-hook enable
 ```
 
 ## From source (non-interactive)
@@ -34,7 +34,7 @@ Builds with Rust/Cargo and installs to `~/.local/bin/` (requires Git and a Rust
 toolchain):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/install.sh | bash
 ```
 
 ## Interactive Installer
@@ -42,8 +42,8 @@ curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-cache/master/insta
 Clone the repository and run the setup script for a guided interactive install:
 
 ```sh
-git clone https://github.com/fabriziosalmi/l0-cache.git
-cd l0-cache
+git clone https://github.com/fabriziosalmi/l0-compressor.git
+cd l0-compressor
 ./install.sh
 ```
 
@@ -52,17 +52,17 @@ cd l0-cache
 Requirements: Rust 1.70+ (for edition 2021 features).
 
 ```sh
-git clone https://github.com/fabriziosalmi/l0-cache.git
-cd l0-cache
+git clone https://github.com/fabriziosalmi/l0-compressor.git
+cd l0-compressor
 cargo build --release
-sudo cp target/release/l0-cache /usr/local/bin/
+sudo cp target/release/l0-compressor /usr/local/bin/
 ```
 
 ## Verify
 
 ```sh
-l0-cache --version
-# l0-cache 0.1.0 (abc1234)
+l0-compressor --version
+# l0-compressor 0.1.0 (abc1234)
 ```
 
 ## Shell Completions
@@ -71,14 +71,14 @@ Generate and install completions for your shell:
 
 ```sh
 # Bash
-l0-cache --completions bash > /etc/bash_completion.d/l0-cache
+l0-compressor --completions bash > /etc/bash_completion.d/l0-compressor
 
 # Zsh
 mkdir -p ~/.zsh/completions
-l0-cache --completions zsh > ~/.zsh/completions/_l0-cache
+l0-compressor --completions zsh > ~/.zsh/completions/_l0-compressor
 
 # Fish
-l0-cache --completions fish > ~/.config/fish/completions/l0-cache.fish
+l0-compressor --completions fish > ~/.config/fish/completions/l0-compressor.fish
 ```
 
 ## Cross-Platform Builds
@@ -108,4 +108,4 @@ make deploy-linux HOST=user@myserver
 make deploy-alpine HOST=user@container
 ```
 
-The deploy target copies the binary via `scp` and verifies with `l0-cache --version`.
+The deploy target copies the binary via `scp` and verifies with `l0-compressor --version`.

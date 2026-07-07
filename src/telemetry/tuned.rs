@@ -114,7 +114,7 @@ pub(crate) fn save_tuned_at_path(path: &std::path::Path, t: &TunedParams, quiet:
         if let Err(e) = fs::create_dir_all(parent) {
             if !quiet {
                 eprintln!(
-                    "l0-cache: warning: cannot create {}: {}",
+                    "l0-compressor: warning: cannot create {}: {}",
                     parent.display(),
                     e
                 );
@@ -186,7 +186,11 @@ pub(crate) fn save_tuned_at_path(path: &std::path::Path, t: &TunedParams, quiet:
     if let Err(e) = write_result {
         let _ = fs::remove_file(&tmp);
         if !quiet {
-            eprintln!("l0-cache: warning: cannot write {}: {}", path.display(), e);
+            eprintln!(
+                "l0-compressor: warning: cannot write {}: {}",
+                path.display(),
+                e
+            );
         }
     }
 }
@@ -203,7 +207,11 @@ fn append_tuned_line(path: &std::path::Path, t: &TunedParams, quiet: bool) {
         }
         Err(e) => {
             if !quiet {
-                eprintln!("l0-cache: warning: cannot write {}: {}", path.display(), e);
+                eprintln!(
+                    "l0-compressor: warning: cannot write {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
     }

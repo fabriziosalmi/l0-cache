@@ -1,17 +1,17 @@
 [package]
-name = "l0-cache"
-version = "0.1.15"
+name = "l0-compressor"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Lightweight CLI proxy that reduces LLM token consumption via universal output filtering"
 license = "MIT"
-repository = "https://github.com/fabriziosalmi/l0-cache"
-homepage = "https://github.com/fabriziosalmi/l0-cache"
+repository = "https://github.com/fabriziosalmi/l0-compressor"
+homepage = "https://github.com/fabriziosalmi/l0-compressor"
 keywords = ["cli", "proxy", "llm", "token", "filter"]
 categories = ["command-line-utilities"]
 
 [[bin]]
-name = "l0-cache"
+name = "l0-compressor"
 path = "src/main.rs"
 
 [dependencies]

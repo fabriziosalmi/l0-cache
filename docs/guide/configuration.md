@@ -1,6 +1,6 @@
 # Configuration
 
-`l0-cache` is configured by command-line flags. An **optional** per-command config
+`l0-compressor` is configured by command-line flags. An **optional** per-command config
 file fills in values you did not set on the command line (see
 [Config file](#config-file-optional) below) — there is still no required config,
 and explicit flags always win.
@@ -50,8 +50,8 @@ per-command with `squelch = false` in the [config file](#config-file-optional).
 
 ## Config file (optional)
 
-Drop a file in `$XDG_CONFIG_HOME/l0-cache/` (or `~/.config/l0-cache/`) to set
-per-command defaults without recompiling and without per-tool parsers. l0-cache
+Drop a file in `$XDG_CONFIG_HOME/l0-compressor/` (or `~/.config/l0-compressor/`) to set
+per-command defaults without recompiling and without per-tool parsers. l0-compressor
 auto-detects, in this order, `config.{json,toml,yaml,yml,conf,ini}` —
 **transparent multi-format with zero extra dependencies** (JSON is parsed strictly
 by serde; TOML/YAML/INI share a small flat parser, since the schema is flat):
@@ -98,11 +98,11 @@ git:
   Auto-tuning then adjusts from that resolved base.
 - A missing/unreadable file is silently ignored; a malformed file is ignored with
   a single stderr note (unless `--quiet`). Unknown keys are skipped, so a config
-  written for a newer l0-cache won't break an older binary.
+  written for a newer l0-compressor won't break an older binary.
 
 ## Parameter Auto-tuning (Enabled by Default)
 
-By default, `l0-cache` automatically tunes `head`, `tail`, and `tail_error`
+By default, `l0-compressor` automatically tunes `head`, `tail`, and `tail_error`
 per **bucket** — `(cmd, args_hash)` — based on the execution history in the
 local metrics log. Pass `--no-auto` to disable. Each bucket carries its
 own learning, so e.g. `curl https://api.openai.com` and `curl https://example.com`
@@ -155,7 +155,7 @@ pinned) is **not** a firing: no event is recorded and nothing is persisted.
 ### Persistence (`tuned.jsonl`)
 
 Each time a rule fires (with a real change to `head`/`tail`/`tail_error`),
-the result is upserted into `$XDG_DATA_HOME/l0-cache/tuned.jsonl`, keyed by
+the result is upserted into `$XDG_DATA_HOME/l0-compressor/tuned.jsonl`, keyed by
 `(cmd, args_hash)` — the file is compacted on write to one line per bucket,
 and entries older than 30 days are pruned (an expired tune also stops
 seeding runs). The next run of the same bucket starts from the saved
@@ -177,21 +177,21 @@ all learned tunes).
 
 ### Diagnostic print
 
-When a rule changes the params, `l0-cache` prints a single note to stderr
+When a rule changes the params, `l0-compressor` prints a single note to stderr
 (silenced by `--quiet`), e.g.
 
 ```
-l0-cache: auto-tuning: 2 consecutive failures detected, expanding tail_error to 720
+l0-compressor: auto-tuning: 2 consecutive failures detected, expanding tail_error to 720
 ```
 
 The same firings are aggregated under the `AUTO-TUNING` section of
-`l0-cache --stats` (and the `auto_tuning` block of `--stats --json`).
+`l0-compressor --stats` (and the `auto_tuning` block of `--stats --json`).
 
 ## Environment Variables
 
 | Variable | Purpose |
 |---|---|
-| `XDG_DATA_HOME` | Override metrics directory (default: `~/.local/share/l0-cache/`) |
+| `XDG_DATA_HOME` | Override metrics directory (default: `~/.local/share/l0-compressor/`) |
 | `HOME` | Used if `XDG_DATA_HOME` is not set |
 | `NO_COLOR` | If set (any value), disables ANSI color in `--stats` / `--doctor` |
 | `FORCE_COLOR` / `CLICOLOR_FORCE` | Force color on even when stdout is not a TTY (CI captures, screenshots) |
@@ -199,12 +199,12 @@ The same firings are aggregated under the `AUTO-TUNING` section of
 By default `--stats` and `--doctor` emit color only when stdout is an interactive
 terminal, so piping or redirecting them yields clean, escape-free text.
 
-If neither is set (containers, cron), `l0-cache` falls back to `/etc/passwd` lookup.
+If neither is set (containers, cron), `l0-compressor` falls back to `/etc/passwd` lookup.
 
 ## Metrics Location
 
-Metrics are stored at `$XDG_DATA_HOME/l0-cache/metrics.jsonl` (or
-`~/.local/share/l0-cache/metrics.jsonl` by default).
+Metrics are stored at `$XDG_DATA_HOME/l0-compressor/metrics.jsonl` (or
+`~/.local/share/l0-compressor/metrics.jsonl` by default).
 
 The file auto-rotates at 10 MB. The previous file is kept as
 `metrics.jsonl.old`. When rotating, entries older than 30 days are automatically

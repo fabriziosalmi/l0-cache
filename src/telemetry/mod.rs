@@ -2,8 +2,8 @@
 
 //! Telemetry: local metrics logging and stats aggregation.
 //!
-//! Appends one JSONL line per execution to `~/.local/share/l0-cache/metrics.jsonl`.
-//! Uses `O_APPEND` for atomic writes (safe for parallel `l0-cache` invocations on APFS).
+//! Appends one JSONL line per execution to `~/.local/share/l0-compressor/metrics.jsonl`.
+//! Uses `O_APPEND` for atomic writes (safe for parallel `l0-compressor` invocations on APFS).
 //! **Never** causes the wrapped command to fail — all errors are swallowed
 //! after a single warning on stderr.
 
@@ -46,7 +46,7 @@ pub use guard::{check_dangerous_command, guard_enabled};
 // Advisory file lock — used by the metric, tuned, stats, and doctor paths.
 pub(crate) use lock::FileLock;
 // Data-directory + sidecar path resolution.
-pub(crate) use paths::{metrics_path, tuned_path};
+pub(crate) use paths::{metrics_path, migrate_legacy_data_dir, tuned_path};
 // Persisted adaptive-tuning state — `lookup_tuned`/`save_tuned`/`TunedParams`
 // reach `main`; helpers + consts feed the adaptive engine, stats, and tests.
 pub(crate) use tuned::*;

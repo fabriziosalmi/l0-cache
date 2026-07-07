@@ -1,6 +1,6 @@
 # Security Policy
 
-We take the security of `l0-cache` seriously. If you believe you have found a security vulnerability, please report it to us privately so that we can address it before public disclosure.
+We take the security of `l0-compressor` seriously. If you believe you have found a security vulnerability, please report it to us privately so that we can address it before public disclosure.
 
 ## Reporting a Vulnerability
 
@@ -22,8 +22,8 @@ Only the latest release version is supported and receives security patches. If y
 
 ## Data Handling
 
-- **Metrics file** — `l0-cache` writes one JSONL line per invocation to
-  `$XDG_DATA_HOME/l0-cache/metrics.jsonl` (or `~/.local/share/...`), created with
+- **Metrics file** — `l0-compressor` writes one JSONL line per invocation to
+  `$XDG_DATA_HOME/l0-compressor/metrics.jsonl` (or `~/.local/share/...`), created with
   `0600` permissions (owner read/write only).
 - **Command arguments** — the metrics `args` field is stored with obvious
   credentials redacted: `--password`/`--token`/`--secret`/`--api-key`/… values

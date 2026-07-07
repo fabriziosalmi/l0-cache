@@ -2,12 +2,12 @@
 layout: home
 
 hero:
-  name: l0-cache
+  name: l0-compressor
   text: CLI proxy for LLM token savings
   tagline: Reduce AI coding assistant token consumption by 50-80% with a single command prefix.
   image:
     src: /screenshot.png
-    alt: l0-cache --stats telemetry dashboard
+    alt: l0-compressor --stats telemetry dashboard
   actions:
     - theme: brand
       text: Get Started
@@ -18,7 +18,7 @@ hero:
 
 features:
   - title: Universal Filtering
-    details: Works with any command. No per-tool parsers and no alias rewriting -- just prefix with l0-cache, or enable the optional Claude Code hook.
+    details: Works with any command. No per-tool parsers and no alias rewriting -- just prefix with l0-compressor, or enable the optional Claude Code hook.
   - title: Zero Overhead
     details: Single-threaded, synchronous Rust binary. Sub-millisecond overhead. 700 KB on disk.
   - title: Production Hardened

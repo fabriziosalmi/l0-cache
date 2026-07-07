@@ -1,11 +1,11 @@
 //! Optional per-command configuration.
 //!
-//! A small file lets users tune l0-cache per command without recompiling and
+//! A small file lets users tune l0-compressor per command without recompiling and
 //! without per-tool parsers — staying "universal-first". It overrides the built-in
 //! defaults; an explicit CLI flag always wins over the config.
 //!
 //! **Transparent multi-format** (zero extra dependencies): the config dir
-//! (`$XDG_CONFIG_HOME/l0-cache/`, else `$HOME/.config/l0-cache/`) is searched for
+//! (`$XDG_CONFIG_HOME/l0-compressor/`, else `$HOME/.config/l0-compressor/`) is searched for
 //! `config.{json,toml,yaml,yml,conf,ini}`. JSON is parsed strictly via serde; the
 //! rest share a forgiving flat parser (the schema is flat, so TOML/YAML/INI styles
 //! reduce to the same shape). Absent/unreadable/malformed config is non-fatal.
@@ -65,6 +65,7 @@ impl Config {
     /// A malformed JSON file prints a single stderr note unless `quiet`; the flat
     /// formats never hard-fail (bad lines are skipped).
     pub fn load(quiet: bool) -> Config {
+        migrate_legacy_config_dir();
         let path = match find_config() {
             Some(p) => p,
             None => return Config::default(),
@@ -79,7 +80,7 @@ impl Config {
                 Err(e) => {
                     if !quiet {
                         eprintln!(
-                            "l0-cache: ignoring malformed config at {} ({})",
+                            "l0-compressor: ignoring malformed config at {} ({})",
                             path.display(),
                             e
                         );
@@ -112,15 +113,32 @@ const CONFIG_NAMES: &[&str] = &[
     "config.ini",
 ];
 
-/// `$XDG_CONFIG_HOME/l0-cache/` then `$HOME/.config/l0-cache/`.
+/// `$XDG_CONFIG_HOME/l0-compressor/` then `$HOME/.config/l0-compressor/`.
 fn config_dir() -> Option<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("l0-cache"));
+            return Some(PathBuf::from(xdg).join("l0-compressor"));
         }
     }
     let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
-    Some(PathBuf::from(home).join(".config").join("l0-cache"))
+    Some(PathBuf::from(home).join(".config").join("l0-compressor"))
+}
+
+/// One-time, best-effort migration of the pre-rename config directory
+/// (`…/l0-cache/`) to `…/l0-compressor/`, so a user's `config.*` survives the
+/// rebrand. Renames ONLY when the new dir does not exist and the legacy one
+/// does; never deletes, and any I/O error is ignored.
+fn migrate_legacy_config_dir() {
+    if let Some(new_dir) = config_dir() {
+        if new_dir.exists() {
+            return;
+        }
+        if let Some(legacy) = new_dir.parent().map(|p| p.join("l0-cache")) {
+            if legacy.is_dir() {
+                let _ = std::fs::rename(&legacy, &new_dir);
+            }
+        }
+    }
 }
 
 /// First existing config file among [`CONFIG_NAMES`].
@@ -245,7 +263,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_ignored_gracefully() {
         // serde ignores unknown keys by default — a forward-compatible config
-        // from a newer l0-cache must not break an older binary.
+        // from a newer l0-compressor must not break an older binary.
         let c = parse(r#"{ "commands": { "cargo": { "head": 5, "future_key": 1 } } }"#);
         assert_eq!(c.for_command("cargo").head, Some(5));
     }

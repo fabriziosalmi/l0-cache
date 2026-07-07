@@ -161,7 +161,7 @@ impl Ui {
     }
 
     /// Top border with an embedded title (left) and optional right-side label,
-    /// e.g. `┌─ l0-cache TELEMETRY ─────────────── last 7d ─┐`.
+    /// e.g. `┌─ l0-compressor TELEMETRY ─────────────── last 7d ─┐`.
     pub fn box_top(&self, title: &str, right: &str) -> String {
         // Fixed (non-dash) glyphs on this line, by branch:
         //   empty right: "┌─ " + title + " " + "┐"                → 5 + title

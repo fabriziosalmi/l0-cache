@@ -1,11 +1,11 @@
-//! `l0-cache --doctor`: installation, PATH, shell, and editor diagnostics.
+//! `l0-compressor --doctor`: installation, PATH, shell, and editor diagnostics.
 
 use super::*;
 
-/// Diagnoses the l0-cache installation, PATH resolution, shell environment, and active LLM editors.
+/// Diagnoses the l0-compressor installation, PATH resolution, shell environment, and active LLM editors.
 pub fn run_doctor() {
     let ui = crate::ui::Ui::new();
-    println!("{}", ui.box_top("l0-cache DOCTOR", "health check"));
+    println!("{}", ui.box_top("l0-compressor DOCTOR", "health check"));
     println!(
         "{}",
         ui.box_row({
@@ -57,13 +57,13 @@ pub fn run_doctor() {
                 );
                 println!(
                     "{}",
-                    ui.ok("l0-cache is correctly configured in your PATH.")
+                    ui.ok("l0-compressor is correctly configured in your PATH.")
                 );
                 ok_count += 1;
             } else {
                 println!(
                     "{}",
-                    ui.warn("l0-cache was not found in your PATH directories.")
+                    ui.warn("l0-compressor was not found in your PATH directories.")
                 );
                 println!("{}", ui.hint("run the installer: ./install.sh --local"));
                 warn_count += 1;
@@ -120,7 +120,7 @@ pub fn run_doctor() {
         match shell_name {
             "zsh" => {
                 config_file = Some(PathBuf::from(&home).join(".zshrc"));
-                let zfunc = PathBuf::from(&home).join(".zfunc").join("_l0-cache");
+                let zfunc = PathBuf::from(&home).join(".zfunc").join("_l0-compressor");
                 completions_exist = zfunc.exists();
             }
             "bash" => {
@@ -130,13 +130,14 @@ pub fn run_doctor() {
                 } else {
                     PathBuf::from(&home).join(".bash_profile")
                 });
-                let bash_comp =
-                    PathBuf::from(&home).join(".local/share/bash-completion/completions/l0-cache");
+                let bash_comp = PathBuf::from(&home)
+                    .join(".local/share/bash-completion/completions/l0-compressor");
                 completions_exist = bash_comp.exists();
             }
             "fish" => {
                 config_file = Some(PathBuf::from(&home).join(".config/fish/config.fish"));
-                let fish_comp = PathBuf::from(&home).join(".config/fish/completions/l0-cache.fish");
+                let fish_comp =
+                    PathBuf::from(&home).join(".config/fish/completions/l0-compressor.fish");
                 completions_exist = fish_comp.exists();
             }
             _ => {}
@@ -146,13 +147,18 @@ pub fn run_doctor() {
             if path.exists() {
                 println!("{}", ui.field("Profile file", &path.display().to_string()));
                 if let Ok(content) = fs::read_to_string(path) {
-                    if content.contains("l0-cache") || content.contains("alias t=") {
-                        println!("{}", ui.ok("Shell profile contains l0-cache references."));
+                    if content.contains("l0-compressor") || content.contains("alias t=") {
+                        println!(
+                            "{}",
+                            ui.ok("Shell profile contains l0-compressor references.")
+                        );
                         ok_count += 1;
                     } else {
                         println!(
                             "{}",
-                            ui.warn("Shell profile exists but has no active l0-cache references.")
+                            ui.warn(
+                                "Shell profile exists but has no active l0-compressor references."
+                            )
                         );
                         warn_count += 1;
                     }
@@ -319,7 +325,7 @@ pub fn run_doctor() {
     if editor_detected {
         println!(
             "{}",
-            ui.ok("Active LLM terminal detected — l0-cache will intercept AI subcommands.")
+            ui.ok("Active LLM terminal detected — l0-compressor will intercept AI subcommands.")
         );
         ok_count += 1;
     } else {
@@ -375,7 +381,7 @@ pub fn run_doctor() {
     if err_count == 0 && warn_count == 0 {
         println!(
             "  {}",
-            ui.green("● Your l0-cache installation is healthy and fully optimized.")
+            ui.green("● Your l0-compressor installation is healthy and fully optimized.")
         );
     } else if err_count == 0 {
         println!(

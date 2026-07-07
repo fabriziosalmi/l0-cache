@@ -6,14 +6,14 @@ use crate::telemetry::*;
 pub fn print_stats(since: Option<&str>, json: bool, cost_per_mtok: f64) {
     let agg = match aggregate_metrics(since) {
         StatsData::NoDataDir => {
-            eprintln!("l0-cache: cannot determine data directory.");
+            eprintln!("l0-compressor: cannot determine data directory.");
             eprintln!("   $HOME and $XDG_DATA_HOME are not set, and /etc/passwd lookup failed.");
             eprintln!("   Set $HOME or $XDG_DATA_HOME to enable metrics.");
             return;
         }
         StatsData::NoFile(p) => {
             println!("No metrics found at {}", p.display());
-            println!("Run some commands with `l0-cache` first.");
+            println!("Run some commands with `l0-compressor` first.");
             return;
         }
         StatsData::Empty => {
@@ -71,7 +71,7 @@ pub(crate) fn render_stats_text(
     };
 
     // ── Summary card ─────────────────────────────────────────────────────
-    let _ = writeln!(out, "{}", ui.box_top("l0-cache TELEMETRY", &period));
+    let _ = writeln!(out, "{}", ui.box_top("l0-compressor TELEMETRY", &period));
 
     let mut row = ui.line();
     row.paint("38;5;245", "Runs")
@@ -230,7 +230,7 @@ pub(crate) fn render_stats_text(
     if !low_savings.is_empty() {
         let _ = writeln!(
             out,
-            "  {} low savings on {} — consider dropping the `l0-cache` prefix there",
+            "  {} low savings on {} — consider dropping the `l0-compressor` prefix there",
             ui.yellow("⚠"),
             low_savings.join(", ")
         );
@@ -513,7 +513,7 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
     let agg = match aggregate_metrics(since) {
         StatsData::Ready(a) => a,
         _ => {
-            println!("No metrics yet — run some commands through `l0-cache` first.");
+            println!("No metrics yet — run some commands through `l0-compressor` first.");
             return;
         }
     };
@@ -526,7 +526,7 @@ pub fn run_discover(since: Option<&str>, cost_per_mtok: f64) {
         }
     };
 
-    println!("{}", ui.bold("l0-cache · optimization advisor"));
+    println!("{}", ui.bold("l0-compressor · optimization advisor"));
     println!();
 
     // Keep prefixing: meaningful savings, ranked by impact.

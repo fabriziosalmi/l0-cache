@@ -47,9 +47,9 @@ jobs:
       - name: Package + checksum
         run: |
           set -euo pipefail
-          bin="target/${{ matrix.target }}/release/l0-cache"
-          art="l0-cache-${{ matrix.target }}.tar.gz"
-          tar -C "$(dirname "$bin")" -czf "$art" l0-cache
+          bin="target/${{ matrix.target }}/release/l0-compressor"
+          art="l0-compressor-${{ matrix.target }}.tar.gz"
+          tar -C "$(dirname "$bin")" -czf "$art" l0-compressor
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$art" > "$art.sha256"
           else
@@ -60,5 +60,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            l0-cache-${{ matrix.target }}.tar.gz
-            l0-cache-${{ matrix.target }}.tar.gz.sha256
+            l0-compressor-${{ matrix.target }}.tar.gz
+            l0-compressor-${{ matrix.target }}.tar.gz.sha256

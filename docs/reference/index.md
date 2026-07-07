@@ -3,7 +3,7 @@
 ## Synopsis
 
 ```
-l0-cache [OPTIONS] [COMMAND]...
+l0-compressor [OPTIONS] [COMMAND]...
 ```
 
 ## Options
@@ -62,7 +62,7 @@ the `auto_tuning` object in `--stats --json`) for what's firing in your
 sessions.
 
 Each rule firing is upserted into a small sidecar at
-`$XDG_DATA_HOME/l0-cache/tuned.jsonl` (compacted on write: one line per
+`$XDG_DATA_HOME/l0-compressor/tuned.jsonl` (compacted on write: one line per
 bucket, 30-day TTL), which the learner reads on the next run of the same
 bucket so the decay/shrink rules **compound** across runs instead of
 resetting from CLI defaults each time — and the `recover_defaults` rule
@@ -121,7 +121,7 @@ unparseable timestamp are excluded from a windowed query.
 
 > Commands whose name starts with `-` are rejected as unrecognized options
 > (almost always a typo'd flag). To wrap a genuinely dash-named executable,
-> use a path prefix: `l0-cache ./-weird-name`.
+> use a path prefix: `l0-compressor ./-weird-name`.
 
 #### `--discover`
 Print an opinionated optimization advisory from your metrics — which prefixed
@@ -152,7 +152,7 @@ Force-enable or force-disable the [Safety Guard](#safety-guard). By default the
 guard auto-enables inside detected AI-assistant terminals.
 
 #### `--quiet`, `-q`
-Suppress l0-cache's own stderr notices (e.g. auto-tuning messages).
+Suppress l0-compressor's own stderr notices (e.g. auto-tuning messages).
 
 #### `--recover`
 On a **failing** command whose output was **truncated**, save the full
@@ -170,14 +170,14 @@ Generate shell completion script and print to stdout. Valid values:
 `bash`, `zsh`, `fish`, `elvish`, `powershell`.
 
 #### `--version`, `-V`
-Print version with git commit hash (e.g. `l0-cache 0.1.0 (abc1234)`).
+Print version with git commit hash (e.g. `l0-compressor 0.1.0 (abc1234)`).
 
 #### `--help`, `-h`
 Print help message.
 
 ## Safety Guard
 
-When `l0-cache` runs inside a detected AI-assistant terminal (Claude Code, Gemini
+When `l0-compressor` runs inside a detected AI-assistant terminal (Claude Code, Gemini
 CLI, Cursor/VS Code), a **best-effort** guard blocks a few clearly destructive
 commands before executing them, exiting with code **126**:
 
@@ -189,7 +189,7 @@ commands before executing them, exiting with code **126**:
 - `DROP DATABASE` via `psql`/`mysql`/`sqlite3`/`sqlcmd`.
 
 **Enabling/disabling** — precedence is `--no-guard` → `--guard` →
-`L0_CACHE_GUARD` → auto-detect. The `L0_CACHE_GUARD` environment variable accepts
+`L0_COMPRESSOR_GUARD` → auto-detect. The `L0_COMPRESSOR_GUARD` environment variable accepts
 `1`/`true`/`on` (force on) and `0`/`false`/`off` (force off).
 
 > The guard is a guard rail, not a sandbox: it pattern-matches argv and shell
@@ -198,7 +198,7 @@ commands before executing them, exiting with code **126**:
 
 ### Disabling telemetry writes
 
-Set `L0_CACHE_NO_TELEMETRY=1` (accepts `1`/`true`/`yes`/`on`) to skip all
+Set `L0_COMPRESSOR_NO_TELEMETRY=1` (accepts `1`/`true`/`yes`/`on`) to skip all
 writes to `metrics.jsonl` and `tuned.jsonl` for that invocation. Intended for
 test harnesses and benchmark scripts so synthetic runs never pollute the real
 stats (the integration suite also isolates via `XDG_DATA_HOME`); filtering and

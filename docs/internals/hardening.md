@@ -1,6 +1,6 @@
 # Hardening
 
-`l0-cache` is designed for unattended operation on servers, containers, and CI
+`l0-compressor` is designed for unattended operation on servers, containers, and CI
 systems. The following protections are in place.
 
 ## Memory Safety
@@ -17,9 +17,9 @@ systems. The following protections are in place.
 | Threat | Protection |
 |---|---|
 | Child killed by signal (SIGKILL, SIGSEGV) | Exit code 128+N (POSIX convention) |
-| User presses Ctrl-C during long command | SIGINT ignored in `l0-cache`, child receives it via process group |
-| `l0-cache cmd | head` closes pipe early | SIGPIPE ignored, BrokenPipe caught, metrics logged, exit 141 |
-| `l0-cache` killed before `child.wait()` | Signal handlers prevent this scenario |
+| User presses Ctrl-C during long command | SIGINT ignored in `l0-compressor`, child receives it via process group |
+| `l0-compressor cmd | head` closes pipe early | SIGPIPE ignored, BrokenPipe caught, metrics logged, exit 141 |
+| `l0-compressor` killed before `child.wait()` | Signal handlers prevent this scenario |
 | `/bin/sh` missing (distroless container) | Pre-spawn check with clear error message |
 
 ## I/O Safety
@@ -32,7 +32,7 @@ systems. The following protections are in place.
 | Metrics file permissions in shared environments | `chmod 0600` on every open |
 | Metrics file growing unbounded | Auto-rotation at 10 MB |
 | Partial JSON write (process killed mid-write) | Stats reader skips malformed lines |
-| Concurrent writes from multiple `l0-cache` instances | `O_APPEND` mode (atomic for lines < PIPE_BUF) |
+| Concurrent writes from multiple `l0-compressor` instances | `O_APPEND` mode (atomic for lines < PIPE_BUF) |
 
 ## What Is Not Protected
 
