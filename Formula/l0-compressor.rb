@@ -14,9 +14,7 @@ class L0Compressor < Formula
   desc "CLI proxy that cuts LLM token use via universal output filtering"
   homepage "https://github.com/fabriziosalmi/l0-compressor"
   url "https://github.com/fabriziosalmi/l0-compressor/archive/refs/tags/v0.2.0.tar.gz"
-  # TODO: re-pin to the v0.2.0 source tarball sha256 once the tag is pushed
-  # (`curl -sL <url> | shasum -a 256`); the value below is the stale v0.1.15 pin.
-  sha256 "9e050e78bf74e591b9136199846d50cb450e74f21ecd59b95729b58c6ba18664"
+  sha256 "8a4a18e17f06ac2935f59e4da7a20982581ab645ba693aaded794e755ad840d8"
   license "MIT"
   head "https://github.com/fabriziosalmi/l0-compressor.git", branch: "master"
 
