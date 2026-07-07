@@ -192,14 +192,21 @@ The same firings are aggregated under the `AUTO-TUNING` section of
 | Variable | Purpose |
 |---|---|
 | `XDG_DATA_HOME` | Override metrics directory (default: `~/.local/share/l0-compressor/`) |
-| `HOME` | Used if `XDG_DATA_HOME` is not set |
+| `XDG_CONFIG_HOME` | Override config directory (default: `~/.config/l0-compressor/`) |
+| `HOME` | Used if the XDG variables are not set |
+| `L0_COMPRESSOR_GUARD` | Force the [safety guard](/reference/#safety-guard) on (`1`/`true`/`on`) or off (`0`/`false`/`off`); otherwise auto-detected |
+| `L0_COMPRESSOR_NO_TELEMETRY` | If truthy, skip all writes to `metrics.jsonl` / `tuned.jsonl` for the invocation |
 | `NO_COLOR` | If set (any value), disables ANSI color in `--stats` / `--doctor` |
 | `FORCE_COLOR` / `CLICOLOR_FORCE` | Force color on even when stdout is not a TTY (CI captures, screenshots) |
+
+The pre-rename `L0_CACHE_GUARD` / `L0_CACHE_NO_TELEMETRY` names are still read
+as deprecated fallbacks; they will be removed at the next major version.
 
 By default `--stats` and `--doctor` emit color only when stdout is an interactive
 terminal, so piping or redirecting them yields clean, escape-free text.
 
-If neither is set (containers, cron), `l0-compressor` falls back to `/etc/passwd` lookup.
+If neither `XDG_DATA_HOME` nor `HOME` is set (containers, cron), `l0-compressor`
+falls back to `/etc/passwd` lookup.
 
 ## Metrics Location
 

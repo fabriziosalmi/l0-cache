@@ -5,31 +5,120 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![MSRV](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](Cargo.toml)
 
-A lightweight CLI proxy written in Rust that reduces LLM token consumption by
-filtering, truncating, and compressing command output. Designed for AI coding
-assistants (Claude Code, Gemini CLI, Cursor) running on macOS, Linux, and
-remote servers.
+A CLI proxy written in Rust that reduces LLM token consumption by filtering,
+truncating, and compressing command output. Prefix any command with
+`l0-compressor` (or enable the transparent Claude Code / Gemini CLI hook) and
+the output an AI coding agent reads is reduced by an estimated 50–80%, while
+exit codes, error tails, and output ordering are preserved. Runs on macOS and
+Linux.
+
+Documentation: [fabriziosalmi.github.io/l0-compressor](https://fabriziosalmi.github.io/l0-compressor/)
 
 <p align="center">
-  <img src="docs/public/screenshot.png" alt="l0-compressor --stats telemetry dashboard" width="513">
+  <img src="docs/public/screenshot.png" alt="l0-compressor --stats telemetry dashboard" width="560">
 </p>
 
-## The Problem
+## Comparison
 
-AI coding assistants read the full output of every shell command. A single
-`cargo test` or `git log` can produce thousands of lines, consuming tokens
-that add no value. The relevant information is almost always in the first
-few lines (headers, command echo) and the last few lines (errors, summary).
+The category — compress command output before an AI coding agent reads it —
+has several active implementations with different mechanisms. The tables below
+cover the tools that operate at the same layer as l0-compressor (a wrapper or
+hook around shell commands). Facts verified against each project's repository
+on 2026-07-07; star counts are approximate and will drift. Savings figures are
+each project's own claim, measured with different methodologies — they are not
+directly comparable.
 
-## The Solution
+### Scope and mechanism
 
-`l0-compressor` wraps any command and applies a pipeline of universal filters:
+| Tool | ★ | Lang | License | Mechanism | Coverage | Unknown commands | Claimed savings |
+|---|---|---|---|---|---|---|---|
+| **l0-compressor** | — | Rust | MIT | generic streaming filters (head/tail, collapse, diff/JSON-aware) | any command | ✅ same behavior | 50–80% (estimated, bytes÷4) |
+| [rtk](https://github.com/rtk-ai/rtk) | ~69k | Rust | Apache-2.0 | per-command parsers, 4 strategies | 100+ commands | partial (passthrough) | 60–90% |
+| [snip](https://github.com/edouard-claude/snip) | ~360 | Go | MIT | declarative YAML filters, 19 pipeline actions | 127 filters | partial | 60–90% |
+| [lean-ctx](https://github.com/yvgude/lean-ctx) | ~3.1k | Rust | Apache-2.0 | shell hook + MCP server (81 tools) + wire proxy | 95+ patterns + file reads | partial | 60–90% |
+| [squeez](https://github.com/claudioemmanuel/squeez) | ~160 | Rust | Apache-2.0 | hook pipeline + cross-call dedup (MinHash) + MCP | 100+ handlers | partial | 89% (own benchmark suite) |
+| [sqz](https://github.com/ojuschugh1/sqz) | ~390 | Rust | ELv2¹ | per-command formatters + repeated-read dedup | 40+ formatters | partial | 24.7% avg (3k real runs) |
+| [lowfat](https://github.com/zdk/lowfat) | ~550 | Rust | Apache-2.0 | pipe filter, 3 intensity levels + file-content compression | 6 curated filters + plugins | partial | 38–96% per command |
+| [chop](https://github.com/AgusRdz/chop) | ~40 | Go | MIT | per-command filters | 52+ commands | partial | 50–90% |
+| [omni](https://github.com/fajarhide/omni) | ~300 | Rust | MIT | noise filter + local session memory (SQLite) | generic + memory | ✅ | 70–90% |
+
+¹ Elastic License 2.0 is not an OSI-approved open-source license.
+
+### Operational features
+
+| Tool | Adaptive tuning | Blocks destructive cmds | Secret redaction | Full-output recovery | Local stats | Agent integrations | Native Windows |
+|---|---|---|---|---|---|---|---|
+| **l0-compressor** | ✅ 6 rules, persisted per `(cmd, args)` | ✅ guard, 161-case adversarial suite | ✅ telemetry args | ✅ `--recover` temp file | dashboard / JSON / `--discover` / `--doctor` | Claude Code + Gemini CLI hooks; rules files for Cursor/Cline/Copilot/Codex | ❌ |
+| rtk | ❌ (static `discover`) | ❌ (exclusion lists) | partial (AWS) | ✅ tee on failure | ✅ + opt-in remote telemetry | 10+ agents | ✅ |
+| snip | ❌ | ❌ | ❌ | ❌ | ✅ SQLite | 2 hooks + prompt injection for others | ❌ |
+| lean-ctx | ✅ per-file read modes | guard layer | ✅ | ✅ 5 retrieval paths | ✅ signed ledger | 30+ agents | ✅ |
+| squeez | ✅ context-pressure scaling | bypass only² | ❌ | ✅ blob store + retrieve | ✅ | 5 hosts | ✅ |
+| sqz | ❌ | ❌ | ✅ entropy-based | ✅ `sqz expand` | ✅ | 7+ agents | ✅ |
+| lowfat | ❌ | ❌ | ❌ | ❌ | ✅ | Claude Code, OpenCode | unverified |
+| chop | ❌ | ❌ | ❌ | ❌ | ✅ `chop gain` | 4 agents | ✅ |
+| omni | memory only | ❌ | ❌ | ✅ hash → store | ✅ | 6 agents | ✅ |
+
+² squeez routes risky commands around compression; it does not refuse to run them.
+
+### Adjacent layers (different mechanism, same goal)
+
+These compress context at the API-wire or MCP level rather than wrapping shell
+commands; some bundle a command-output layer:
+
+| Tool | ★ | Layer | Notes |
+|---|---|---|---|
+| [headroom](https://github.com/headroomlabs-ai/headroom) | ~57k | API proxy / library / MCP | AST-aware code compression, trained model; bundles rtk for shell output |
+| [context-mode](https://github.com/mksglu/context-mode) | ~19k | MCP sandbox | output executes in a sandbox, never enters context; BM25 retrieval |
+| [token-optimizer](https://github.com/alexgreensh/token-optimizer) | ~1.6k | hook archiving | outputs >4 KB archived and replaced with a retrieval pointer; PolyForm-NC license |
+| [entroly](https://github.com/juyterman1000/entroly) | ~420 | API proxy / MCP | rank-select-compress with auditable "context receipts" |
+| [tamp](https://github.com/sliday/tamp) | ~90 | localhost API proxy | 9-stage pipeline, default secret redaction |
+
+Generic prompt compressors (Microsoft LLMLingua and similar) and
+memory/codebase-index MCP servers solve a different problem and are omitted.
+
+### Where l0-compressor is behind
+
+- Per-command parsers (rtk, snip, chop) produce higher ratios and better
+  semantic output on the commands they cover — e.g. grouped test failures.
+  Generic filters do not match that on known commands.
+- No native Windows build.
+- No cross-call deduplication, file-read compression, MCP server, or session
+  memory (squeez, sqz, lean-ctx, omni have one or more of these).
+- The savings figure is an estimate (bytes ÷ 4), not tokenizer-measured;
+  squeez and sqz publish tokenizer-based benchmarks.
+- The smallest install base in the table.
+
+### Where l0-compressor differentiates
+
+- Identical behavior on unknown and proprietary CLIs, with no parser or filter
+  set to maintain.
+- Adaptive auto-tuning with persistence: six rules adjust `(head, tail,
+  tail_error)` per `(cmd, args_hash)` bucket and compound across runs — see
+  [Adaptive auto-tuning](#adaptive-auto-tuning). Only lean-ctx and squeez have
+  comparable learning behavior, at other layers.
+- A destructive-command guard with an adversarial regression suite; most tools
+  in the table have no refusal mechanism at all.
+- Documented, tested hardening: bounded memory, signal/process-group
+  forwarding, symlink-safe recovery files, multibyte-safe line transforms.
+- Conservative telemetry accounting: local-only, credential redaction, and a
+  dashboard that discloses when a single command dominates the savings.
+
+## How it works
+
+AI coding agents read the full output of every shell command they run. Most of
+it is noise: passing-test lines, progress bars, repeated build output. The
+relevant information concentrates in the first lines (headers, command echo)
+and the last lines (errors, summary, exit status).
+
+`l0-compressor` wraps the command and applies a pipeline of generic streaming
+filters:
 
 ```
 command output
+  --> line normalization (progress bars, backspace/bell, giant JSON lines)
   --> ANSI escape stripping
-  --> line collapsing (identical & prefix-based) (×N)
   --> unified-diff context collapsing (keep changes, drop unchanged runs)
+  --> line collapsing (identical & prefix-based) (×N)
   --> blank line squeezing
   --> head/tail buffering (30 + 30 lines)
   --> clean-success squelch (exit 0 + no error signal: trim the tail further)
@@ -37,57 +126,20 @@ command output
   --> filtered output
 ```
 
-Typical savings: 50-80% fewer tokens per command invocation.
-
 **Clean-success squelch:** on a zero exit with no error/warning signal anywhere
-in the output, the tail window is trimmed further — a clean build/test/install's
-middle is almost always progress noise, and the agent rarely needs 30 tail lines
-to confirm success. The head (command echo) is always kept, the summary line
+in the output, the tail window is trimmed further — the middle of a clean
+build/test/install is progress noise, and 30 tail lines are rarely needed to
+confirm success. The head (command echo) is always kept, the summary line
 always survives, and the moment any `error`/`warn`/`fail`/`panic`/… signal
 appears — or the command exits non-zero — the full tail is restored. Disable
 with `--no-squelch` or `squelch = false` in config.
-
-## How it compares
-
-l0-compressor is **universal-first**: it compresses *any* command's output with generic,
-format-aware filters instead of maintaining a parser per tool. That trades some
-best-case ratio on well-known commands for zero per-tool maintenance and instant
-support for unknown/proprietary CLIs. Where it stands apart is the *intelligence
-around* the filtering.
-
-| | l0-compressor | [rtk](https://github.com/rtk-ai/rtk) | [snip](https://github.com/edouard-claude/snip) | Lean Ctx |
-|---|---|---|---|---|
-| Filtering | universal + format-aware (head/tail, collapse, diff) | 100+ per-command parsers | 127 YAML filters | MCP server + cache |
-| Works on unknown/custom commands | ✅ | partial | partial | partial |
-| **Adaptive auto-tuning** (by exit code) | ✅ | ❌ | ❌ | ❌ |
-| **Safety guard** (blocks dangerous cmds) | ✅ | ❌ | ❌ | ❌ |
-| Full-output recovery on failure | ✅ `--recover` | ✅ | ❌ | ✅ (cache) |
-| Transparent hook | Claude Code, Gemini CLI | many | many | MCP |
-| Per-command config | JSON / TOML / YAML | TOML | YAML | — |
-| Stats: dashboard / `--discover` / JSON | ✅ | ✅ | ✅ | partial |
-| New runtime dependencies | none | none | none (Go) | — |
-
-**Uniquely ours:** five-rule adaptive auto-tuning that learns per
-`(cmd, args_hash)` bucket (failure backoff, two consecutive-decay tiers,
-proactive shrink on long clean histories, steady-state decay on window-adaptive
-truncation rate) and **persists** tuned `(head, tail, tail_error)` between
-runs so the learning compounds — see [Adaptive
-auto-tuning](#adaptive-auto-tuning). Plus a guard that blocks `rm -rf /` /
-reverse shells / credential exfiltration / `DROP DATABASE`, systematic
-credential redaction in telemetry, and tested hardening (bounded memory,
-signal/process-group forwarding, OOM caps).
-
-**Where the others win:** deeper per-command semantic output (e.g. grouped test
-failures) and a longer list of pre-wired agents. For maximum ratio on a fixed set
-of known commands, rtk/snip go further; for a safe, adaptive, zero-maintenance proxy
-that works on *everything*, that's l0-compressor.
 
 ## Installation
 
 ### Prebuilt binary (no Rust needed)
 
 Download a prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
-latest release and install it to `~/.local/bin/` (with the `t` alias):
+latest release and install it to `~/.local/bin/` (with the `l0-comp` and `t` aliases):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/install-binary.sh | sh
@@ -129,8 +181,14 @@ cp target/release/l0-compressor /usr/local/bin/
 
 ```sh
 l0-compressor --version
-# l0-compressor 0.1.0 (abc1234)
+# l0-compressor 0.2.0 (abc1234)
 ```
+
+> **Upgrading from l0-cache:** the project was renamed in 0.2.0. On first run
+> the new binary migrates the data and config directories non-destructively
+> (`…/l0-cache/` → `…/l0-compressor/`); metrics, adaptive tunes, and config
+> carry over. `L0_CACHE_GUARD` / `L0_CACHE_NO_TELEMETRY` are still read as
+> deprecated fallbacks until the next major version.
 
 ## Usage
 
@@ -178,6 +236,7 @@ l0-compressor --token-factor 8 cargo test
 --tail N             Lines to keep from end (default: 30)
 --tail-error N       Tail lines on non-zero exit (default: 120)
 --threshold N        Only truncate if output exceeds N lines (default: 100)
+--no-squelch         Disable the clean-success squelch (keep the full tail on clean exits)
 --only-errors        Keep only lines matching error/warn/fail/panic/exception/etc.
 --recover            On a failing command whose output was truncated, save the full
                      output to a temp file and point to it in the banner (so the agent
@@ -392,11 +451,20 @@ Gemini CLI, Cursor/VS Code terminals), it enables a **best-effort** guard that
 blocks a few obviously destructive commands before they run, exiting with code
 **126**:
 
-- recursive force-removal of a critical system path (`rm -rf /`, `/etc`, `/usr`, …),
-  including inside `sh -c "…"` wrappers and with trailing-slash/glob variants;
+- recursive force-removal of a critical system path (`rm -rf /`, `/etc`, `/usr`, …)
+  or of the user's HOME and its first-level data folders (`rm -rf ~`, `$HOME`,
+  `~/Documents`, …) — including inside `sh -c "…"` wrappers (unwrapped
+  recursively), with `..`-traversal, trailing-slash/glob, `env`/`sudo`/`VAR=x`
+  prefix, and `~user` variants;
 - reverse shells / socket redirections (`/dev/tcp`, `/dev/udp`);
 - credential exfiltration (`curl`/`wget`/`nc`/`ssh` touching `id_rsa`, `.env`, `shadow`, …);
 - `DROP DATABASE` via `psql`/`mysql`/`sqlite3`/`sqlcmd`.
+
+A 161-case adversarial test suite pins these decisions in CI (it exercises only
+the guard's decision function, so it never runs a real `rm`). Documented
+residual limits: command substitution / `eval`, glob expansion, targets via
+stdin (`… | xargs rm -rf`), other destructive tools (`find -delete`, `dd`,
+`shred`), symlinked aliases.
 
 Control it explicitly with `--guard` / `--no-guard`, or the `L0_COMPRESSOR_GUARD`
 environment variable (`1`/`true`/`on` to force on, `0`/`false`/`off` to force off).
@@ -420,6 +488,7 @@ l0-compressor <command>
   |
   +-- FilterPipeline             # streaming, O(head+tail) memory
   |     |-- strip_ansi()
+  |     |-- DiffCollapse
   |     |-- CollapseLines
   |     |-- WhitespaceSqueeze
   |     +-- HeadTailBuffer
@@ -468,7 +537,7 @@ Each invocation logs a JSON line to `~/.local/share/l0-compressor/metrics.jsonl`
   "strategy": "head_tail",
   "exit_code": 0,
   "duration_ms": 1234,
-  "version": "0.1.11",
+  "version": "0.2.0",
   "adaptive_event": "decay_moderate",
   "args_hash": "a1b2c3d4"
 }
@@ -488,7 +557,8 @@ then `/etc/passwd` lookup (for containers, cron, systemd).
 File permissions are set to 0600. `metrics.jsonl` auto-rotates at 10 MB
 (entries older than 30 days are pruned at rotation); `tuned.jsonl` is
 compacted on write (one line per bucket, 30-day TTL). `--reset-stats`
-deletes both.
+deletes both. Set `L0_COMPRESSOR_NO_TELEMETRY=1` to skip all telemetry writes
+for an invocation (useful for test harnesses and benchmarks).
 
 ## Cross-Platform Support
 
@@ -553,19 +623,28 @@ The following protections are in place for production use across diverse
 environments:
 
 - UTF-8 lossy reads: never drops lines on invalid encoding
+- Multibyte-safe line transforms: char-boundary-safe slicing throughout
+  (a `€`/emoji/CJK char straddling a transform offset used to crash the
+  wrapper and swallow the child's exit code; regression-tested since 0.1.15)
 - Line length cap: 1 MB per line prevents OOM on binary/minified input
 - Raw mode cap: 256 MB prevents OOM on massive output
 - SIGPIPE handling: metrics are always logged, even when piped to `head`
 - Exit code 128+N: POSIX-correct for signal-killed processes
 - `$HOME` fallback: `/etc/passwd` lookup for containers, cron, systemd
 - Metrics rotation: auto-rename to `.old` at 10 MB
-- File permissions: 0600 on metrics file
+- File permissions: 0600 on metrics file; credential-shaped values in
+  recorded `args` are redacted before writing
+- `--recover` temp file hardened against shared-`/tmp` symlink attacks:
+  private `0700` directory, `0600` file opened with `O_NOFOLLOW`
 - Shell check: clear error when `/bin/sh` is missing
+
+See [Hardening](https://fabriziosalmi.github.io/l0-compressor/internals/hardening.html)
+in the docs for the threat-by-threat table.
 
 ## Development
 
 ```sh
-cargo test           # 254 unit + 38 E2E integration tests
+cargo test           # 308 unit + 46 E2E integration tests
 cargo clippy         # 0 warnings enforced
 cargo build --release
 ```

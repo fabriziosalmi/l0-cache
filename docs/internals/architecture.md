@@ -52,10 +52,13 @@ output order, drained synchronously from the main thread.
 
 | Module | File | Responsibility |
 |---|---|---|
-| `args` | `src/args.rs` | CLI argument parsing via clap |
-| `filter` | `src/filter.rs` | ANSI strip, collapse, squeeze, head/tail buffer |
-| `runner` | `src/runner.rs` | Process spawning, line reading, exit code |
+| `args` | `src/args.rs` | CLI argument parsing via clap, interactive-command allowlist |
+| `config` | `src/config.rs` | Optional per-command config file (JSON via serde; TOML/YAML/INI via a flat parser) |
+| `filter` | `src/filter.rs` | ANSI strip, line/prefix collapse, diff-context collapse, squeeze, head/tail buffer, squelch |
+| `runner` | `src/runner.rs` | Process spawning, line reading (progress-bar/backspace/JSON line transforms), exit code, safety guard |
+| `recovery` | `src/recovery.rs` | `--recover` full-output temp file (private `0700` dir, `0600` + `O_NOFOLLOW`) |
 | `telemetry` | `src/telemetry/` | JSONL metrics, stats reporting, adaptive learner + `tuned.jsonl`; split into focused submodules (`metric`, `stats/`, `adaptive`, `tuned`, `doctor`, `lock`, `paths`) behind `mod.rs` |
+| `ui` | `src/ui.rs` | Boxed terminal rendering shared by `--stats` and `--doctor`, color gating |
 | `main` | `src/main.rs` | Orchestration, signal handling, output writing |
 
 ## Execution Modes

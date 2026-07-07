@@ -1,11 +1,28 @@
 # Filter Pipeline
 
-The filter pipeline processes lines in streaming fashion. Each line passes
-through four stages before reaching the head/tail buffer.
+The filter pipeline processes lines in streaming fashion. Each line is
+normalized at read time, then passes through the pipeline stages —
+diff-context collapse, line collapse, whitespace squeeze — before reaching
+the head/tail buffer. The stages below are in execution order.
 
 ## Stages
 
-### 1. ANSI Stripping
+### 1. Read-time Line Normalization (filtered mode only)
+
+Applied while reading each line, before anything else, and skipped entirely
+in `--raw` mode:
+
+- **Progress-bar squashing** — a line containing interior carriage returns
+  (a command redrawing the same line) keeps only the part after the last
+  `\r`, emulating what a terminal would display.
+- **Backspace / bell resolution** — `\b` and DEL erase the previous
+  character (UTF-8 aware); BEL bytes are dropped.
+- **Giant JSON line truncation** — a line over 2000 bytes whose first
+  non-whitespace byte is `{` or `[` is cut at 2000 bytes with an explicit
+  `... [Large JSON Payload Truncated for LLM] ...` marker instead of being
+  forwarded whole.
+
+### 2. ANSI Stripping
 
 Removes all ANSI escape sequences (colors, cursor movement, bold, etc.)
 using the `strip-ansi-escapes` crate. This is always applied, even in raw
@@ -21,7 +38,18 @@ Output:
 PASSED test_something
 ```
 
-### 2. Line Collapsing (Identical & Prefix-based)
+### 3. Diff Context Collapsing
+
+Inside a unified diff, long runs of *unchanged context lines* are collapsed to
+a `… (N unchanged diff lines) …` marker. The stage activates only after a real
+hunk header (`@@ … @@`), so non-diff output — even indented text whose lines
+start with a space — is never touched. File and hunk headers and every
+added/removed line are kept verbatim; only context runs longer than 8 lines
+are collapsed, keeping 3 lines at each edge. The context buffer is bounded by
+both a line cap (5000) and a byte cap (1 MB), so a pathological hunk cannot
+grow memory unbounded. A non-diff line deactivates the stage.
+
+### 4. Line Collapsing (Identical & Prefix-based)
 
 To handle repetitive noise, the collapser runs in two modes:
 
@@ -49,7 +77,7 @@ Input:
 ```
   Compiling serde v1.0.1
   Compiling clap v4.0.0
-  Compiling l0-compressor v0.1.0
+  Compiling l0-compressor v0.2.0
 ```
 
 Output:
@@ -59,7 +87,7 @@ Output:
 
 The collapsed output is emitted when the next *non-matching* line arrives (or at EOF), ensuring streaming correctness.
 
-### 3. Whitespace Squeezing
+### 5. Whitespace Squeezing
 
 Consecutive blank lines are reduced to a single blank line. Lines containing
 only whitespace are treated as blank.
@@ -86,7 +114,7 @@ section 2
 section 3
 ```
 
-### 4. Head/Tail Buffer
+### 6. Head/Tail Buffer
 
 The core data structure. Maintains two fixed-size buffers:
 

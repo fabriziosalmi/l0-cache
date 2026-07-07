@@ -3,15 +3,24 @@
 ## Prebuilt binary (no Rust needed)
 
 Download a prebuilt binary for your platform (macOS arm64/x64, Linux x64) from the
-latest GitHub Release and install it to `~/.local/bin/` (with the `t` alias). The
-script verifies the SHA-256 checksum:
+latest GitHub Release and install it to `~/.local/bin/` (with the `l0-comp` and
+`t` aliases). The script verifies the SHA-256 checksum:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/install-binary.sh | sh
 ```
 
 Override the install dir with `L0_COMPRESSOR_BIN_DIR`, or pin a version with
-`L0_COMPRESSOR_VERSION=v0.1.8`.
+`L0_COMPRESSOR_VERSION=v0.2.0`.
+
+::: info Upgrading from l0-cache
+The project was renamed from `l0-cache` in 0.2.0. On first run the new binary
+performs a one-time, non-destructive migration of the data and config
+directories (`…/l0-cache/` → `…/l0-compressor/`), so accumulated metrics,
+adaptive tunes, and config files carry over. The `L0_CACHE_GUARD` and
+`L0_CACHE_NO_TELEMETRY` environment variables keep working as deprecated
+fallbacks until the next major version.
+:::
 
 ## Homebrew (macOS / Linux)
 
@@ -49,7 +58,7 @@ cd l0-compressor
 
 ## Manual Build
 
-Requirements: Rust 1.70+ (for edition 2021 features).
+Requirements: Rust 1.85+ (see `rust-version` in `Cargo.toml`).
 
 ```sh
 git clone https://github.com/fabriziosalmi/l0-compressor.git
@@ -62,7 +71,7 @@ sudo cp target/release/l0-compressor /usr/local/bin/
 
 ```sh
 l0-compressor --version
-# l0-compressor 0.1.0 (abc1234)
+# l0-compressor 0.2.0 (abc1234)
 ```
 
 ## Shell Completions

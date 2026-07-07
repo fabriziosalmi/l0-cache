@@ -157,9 +157,11 @@ body {
   border-radius: 12px;
   border-width: 1px;
 }
+/* Keep VitePress's block+scroll behavior: overflow-x must stay scrollable or
+   wide tables get clipped with no way to reach the hidden columns. */
 .vp-doc table {
   border-radius: 10px;
-  overflow: hidden;
+  overflow-x: auto;
   border: 1px solid var(--vp-c-divider);
 }
 .vp-doc tr {

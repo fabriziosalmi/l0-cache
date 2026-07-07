@@ -34,9 +34,21 @@ l0-compressor cargo test
 The output is filtered through a streaming pipeline:
 
 1. **ANSI stripping** -- removes color codes, cursor movement, etc.
-2. **Identical line collapsing** -- repeated lines become `(×N)`
-3. **Blank line squeezing** -- consecutive blanks reduced to one
-4. **Head/tail buffering** -- keeps first 30 and last 30 lines, discards the middle
+2. **Line normalization** -- progress bars collapsed to their final state
+   (interior `\r`), backspace/bell resolved, giant single-line JSON payloads
+   truncated
+3. **Line collapsing** -- identical and same-prefix runs become one line with
+   a `(×N)` count
+4. **Diff context collapsing** -- inside unified diffs, long runs of unchanged
+   context lines are collapsed; changed lines are always kept
+5. **Blank line squeezing** -- consecutive blanks reduced to one
+6. **Head/tail buffering** -- keeps first 30 and last 30 lines, discards the middle
+7. **Clean-success squelch** -- on a zero exit with no error signal, the tail
+   is trimmed further (the summary line always survives)
+
+On top of the pipeline, [adaptive auto-tuning](./configuration#parameter-auto-tuning-enabled-by-default)
+adjusts the head/tail budgets per command from your execution history, and
+persists what it learns between runs.
 
 The result is a compact output that preserves the information an LLM needs
 to understand what happened.
@@ -48,6 +60,9 @@ to understand what happened.
   you invoke it explicitly. An optional, off-by-default
   [Claude Code hook](./claude-code) can do the prefixing for you, and is just as
   conservative about what it touches.
-- **Safe**: never modifies the child command's behavior
+- **Safe**: never modifies the child command's behavior. The one deliberate
+  exception is the [safety guard](/reference/#safety-guard), which refuses to
+  run a small set of clearly destructive commands (exit 126) when an
+  AI-assistant terminal is detected; `--no-guard` opts out.
 - **Lightweight**: single Rust binary, zero runtime dependencies
 - **Observable**: every invocation logs metrics for analysis

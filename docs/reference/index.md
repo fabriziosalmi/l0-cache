@@ -163,14 +163,15 @@ small/under-threshold output), bounded, and fail-safe (any I/O error is ignored)
 ### Utility
 
 #### `--doctor`
-Diagnose system installation, PATH resolution, shell configuration, and active LLM editors. Prints a SOTA terminal health report.
+Diagnose system installation, PATH resolution, shell configuration, and active
+LLM editors, and print a boxed health report (same visual language as `--stats`).
 
 #### `--completions <SHELL>`
 Generate shell completion script and print to stdout. Valid values:
 `bash`, `zsh`, `fish`, `elvish`, `powershell`.
 
 #### `--version`, `-V`
-Print version with git commit hash (e.g. `l0-compressor 0.1.0 (abc1234)`).
+Print version with git commit hash (e.g. `l0-compressor 0.2.0 (abc1234)`).
 
 #### `--help`, `-h`
 Print help message.
@@ -190,7 +191,17 @@ commands before executing them, exiting with code **126**:
 
 **Enabling/disabling** — precedence is `--no-guard` → `--guard` →
 `L0_COMPRESSOR_GUARD` → auto-detect. The `L0_COMPRESSOR_GUARD` environment variable accepts
-`1`/`true`/`on` (force on) and `0`/`false`/`off` (force off).
+`1`/`true`/`on` (force on) and `0`/`false`/`off` (force off). The pre-rename
+`L0_CACHE_GUARD` name is read as a deprecated fallback.
+
+The `rm -rf` check also covers the user's HOME and its first-level data folders
+(Documents, Desktop, Downloads, …), `..`-traversal spellings (`/etc/../etc`),
+home parents (`/home`, `/Users`), nested `sh -c` payloads (unwrapped recursively,
+bounded depth), `env`/`sudo`/`VAR=x` wrapper prefixes, and `~user` references. A
+161-case adversarial test suite pins these decisions in CI. Known residual
+limits (documented, unresolved by design for a static lint): command
+substitution / `eval`, glob expansion, targets via stdin (`… | xargs rm -rf`),
+other destructive tools (`find -delete`, `dd`, `shred`), symlinked aliases.
 
 > The guard is a guard rail, not a sandbox: it pattern-matches argv and shell
 > payloads and can be bypassed by a determined caller. Bypass an intentional
