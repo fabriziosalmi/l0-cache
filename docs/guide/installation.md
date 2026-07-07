@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/fabriziosalmi/l0-compressor/master/
 ```
 
 Override the install dir with `L0_COMPRESSOR_BIN_DIR`, or pin a version with
-`L0_COMPRESSOR_VERSION=v0.2.0`.
+`L0_COMPRESSOR_VERSION=v0.3.0`.
 
 ::: info Upgrading from l0-cache
 The project was renamed from `l0-cache` in 0.2.0. On first run the new binary
@@ -39,10 +39,10 @@ l0-compressor-claude-hook install && l0-compressor-claude-hook enable
 
 ## Windows (experimental)
 
-Native Windows support is experimental: master builds and passes a native
-smoke test in CI, and starting from the next tagged release a
-`l0-compressor-x86_64-pc-windows-msvc.zip` is attached to the GitHub Release.
-Until then, build from source:
+Native Windows support is experimental. Since v0.3.0 a
+`l0-compressor-x86_64-pc-windows-msvc.zip` (with SHA-256 checksum) is attached
+to the GitHub Release — download, unzip, and put `l0-compressor.exe` on your
+`PATH`. Or build from source:
 
 ```powershell
 git clone https://github.com/fabriziosalmi/l0-compressor.git
@@ -89,7 +89,7 @@ sudo cp target/release/l0-compressor /usr/local/bin/
 
 ```sh
 l0-compressor --version
-# l0-compressor 0.2.0 (abc1234)
+# l0-compressor 0.3.0 (abc1234)
 ```
 
 ## Shell Completions

@@ -77,7 +77,7 @@ Input:
 ```
   Compiling serde v1.0.1
   Compiling clap v4.0.0
-  Compiling l0-compressor v0.2.0
+  Compiling l0-compressor v0.3.0
 ```
 
 Output:

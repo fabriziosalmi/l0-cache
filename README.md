@@ -12,7 +12,7 @@ the output an AI coding agent reads shrinks by 50–80% on typical mixed
 sessions (telemetry estimate) and 88–97% on noisy outputs (tokenizer-measured
 — see [Benchmarks](#benchmarks)), while exit codes, error tails, and output
 ordering are preserved. Runs on macOS and Linux; native Windows support is
-experimental (on master, unreleased).
+experimental (prebuilt zip from v0.3.0).
 
 Documentation: [fabriziosalmi.github.io/l0-compressor](https://fabriziosalmi.github.io/l0-compressor/)
 
@@ -60,7 +60,7 @@ directly comparable.
 | chop | ❌ | ❌ | ❌ | ❌ | ✅ `chop gain` | 4 agents | ✅ |
 | omni | memory only | ❌ | ❌ | ✅ hash → store | ✅ | 6 agents | ✅ |
 
-¹ Native Windows spawn path is on master (built and smoke-tested in CI), not yet in a release. See [Windows support](#windows-support-experimental).
+¹ Native Windows support is experimental: shipped as a prebuilt zip since v0.3.0, built and smoke-tested in CI, but with less field mileage than the unix builds. See [Windows support](#windows-support-experimental).
 ² squeez routes risky commands around compression; it does not refuse to run them.
 
 ### Adjacent layers (different mechanism, same goal)
@@ -84,8 +84,8 @@ memory/codebase-index MCP servers solve a different problem and are omitted.
 - Per-command parsers (rtk, snip, chop) produce higher ratios and better
   semantic output on the commands they cover — e.g. grouped test failures.
   Generic filters do not match that on known commands.
-- Windows support is experimental and unreleased; the others in the ✅ column
-  ship Windows binaries today.
+- Windows support is newer and less field-tested than the others in the
+  ✅ column, which have shipped Windows binaries for longer.
 - No cross-call deduplication, file-read compression, MCP server, or session
   memory (squeez, sqz, lean-ctx, omni have one or more of these).
 - The built-in `--stats` telemetry estimates tokens as bytes ÷ 4; only the
@@ -208,7 +208,7 @@ cp target/release/l0-compressor /usr/local/bin/
 
 ```sh
 l0-compressor --version
-# l0-compressor 0.2.0 (abc1234)
+# l0-compressor 0.3.0 (abc1234)
 ```
 
 > **Upgrading from l0-cache:** the project was renamed in 0.2.0. On first run
@@ -564,7 +564,7 @@ Each invocation logs a JSON line to `~/.local/share/l0-compressor/metrics.jsonl`
   "strategy": "head_tail",
   "exit_code": 0,
   "duration_ms": 1234,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "adaptive_event": "decay_moderate",
   "args_hash": "a1b2c3d4"
 }
@@ -604,8 +604,9 @@ for an invocation (useful for test harnesses and benchmarks).
 ### Windows support (experimental)
 
 The binary builds and runs natively on Windows (`x86_64-pc-windows-msvc`,
-built and smoke-tested in CI; release zip ships from the next tag). The
-mechanics differ from unix in ways that matter:
+built and smoke-tested in CI; `l0-compressor-x86_64-pc-windows-msvc.zip` is
+attached to releases since v0.3.0). The mechanics differ from unix in ways
+that matter:
 
 - **No shell involved.** The command is spawned directly via `CreateProcess`;
   stdout and stderr are merged by two drain threads. Interleaving between the

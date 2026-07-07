@@ -171,7 +171,7 @@ Generate shell completion script and print to stdout. Valid values:
 `bash`, `zsh`, `fish`, `elvish`, `powershell`.
 
 #### `--version`, `-V`
-Print version with git commit hash (e.g. `l0-compressor 0.2.0 (abc1234)`).
+Print version with git commit hash (e.g. `l0-compressor 0.3.0 (abc1234)`).
 
 #### `--help`, `-h`
 Print help message.
