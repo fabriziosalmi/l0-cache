@@ -13,8 +13,8 @@
 class L0Compressor < Formula
   desc "CLI proxy that cuts LLM token use via universal output filtering"
   homepage "https://github.com/fabriziosalmi/l0-compressor"
-  url "https://github.com/fabriziosalmi/l0-compressor/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "8a4a18e17f06ac2935f59e4da7a20982581ab645ba693aaded794e755ad840d8"
+  url "https://github.com/fabriziosalmi/l0-compressor/archive/refs/tags/v0.3.0.tar.gz"
+  sha256 "97cec5cafa21f7e6aa44a0906bdc920c8ce11a170ccd456aad44cf6d1ab9884a"
   license "MIT"
   head "https://github.com/fabriziosalmi/l0-compressor.git", branch: "master"
 
