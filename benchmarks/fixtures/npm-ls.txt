@@ -1,0 +1,222 @@
+l0-cache@ /Users/fab/Documents/git/l0-cache
+└─┬ vitepress@2.0.0-alpha.18
+  ├── @docsearch/css@4.6.3
+  ├── @docsearch/js@4.6.3
+  ├── @docsearch/sidepanel-js@4.6.3
+  ├─┬ @iconify-json/simple-icons@1.2.89
+  │ └── @iconify/types@2.0.0
+  ├─┬ @shikijs/core@4.3.1
+  │ ├─┬ @shikijs/primitive@4.3.1
+  │ │ ├── @shikijs/types@4.3.1 deduped
+  │ │ ├── @shikijs/vscode-textmate@10.0.2 deduped
+  │ │ └── @types/hast@3.0.4 deduped
+  │ ├── @shikijs/types@4.3.1 deduped
+  │ ├── @shikijs/vscode-textmate@10.0.2
+  │ ├─┬ @types/hast@3.0.4
+  │ │ └── @types/unist@3.0.3
+  │ └─┬ hast-util-to-html@9.0.5
+  │   ├── @types/hast@3.0.4 deduped
+  │   ├── @types/unist@3.0.3 deduped
+  │   ├── ccount@2.0.1
+  │   ├── comma-separated-tokens@2.0.3
+  │   ├─┬ hast-util-whitespace@3.0.0
+  │   │ └── @types/hast@3.0.4 deduped
+  │   ├── html-void-elements@3.0.0
+  │   ├─┬ mdast-util-to-hast@13.2.1
+  │   │ ├── @types/hast@3.0.4 deduped
+  │   │ ├─┬ @types/mdast@4.0.4
+  │   │ │ └── @types/unist@3.0.3 deduped
+  │   │ ├── @ungap/structured-clone@1.3.2
+  │   │ ├─┬ devlop@1.1.0
+  │   │ │ └── dequal@2.0.3
+  │   │ ├─┬ micromark-util-sanitize-uri@2.0.1
+  │   │ │ ├─┬ micromark-util-character@2.1.1
+  │   │ │ │ ├── micromark-util-symbol@2.0.1 deduped
+  │   │ │ │ └── micromark-util-types@2.0.2
+  │   │ │ ├── micromark-util-encode@2.0.1
+  │   │ │ └── micromark-util-symbol@2.0.1
+  │   │ ├── trim-lines@3.0.1
+  │   │ ├─┬ unist-util-position@5.0.0
+  │   │ │ └── @types/unist@3.0.3 deduped
+  │   │ ├─┬ unist-util-visit@5.1.0
+  │   │ │ ├── @types/unist@3.0.3 deduped
+  │   │ │ ├─┬ unist-util-is@6.0.1
+  │   │ │ │ └── @types/unist@3.0.3 deduped
+  │   │ │ └─┬ unist-util-visit-parents@6.0.2
+  │   │ │   ├── @types/unist@3.0.3 deduped
+  │   │ │   └── unist-util-is@6.0.1 deduped
+  │   │ └─┬ vfile@6.0.3
+  │   │   ├── @types/unist@3.0.3 deduped
+  │   │   └─┬ vfile-message@4.0.3
+  │   │     ├── @types/unist@3.0.3 deduped
+  │   │     └─┬ unist-util-stringify-position@4.0.0
+  │   │       └── @types/unist@3.0.3 deduped
+  │   ├── property-information@7.2.0
+  │   ├── space-separated-tokens@2.0.2
+  │   ├─┬ stringify-entities@4.0.4
+  │   │ ├── character-entities-html4@2.1.0
+  │   │ └── character-entities-legacy@3.0.0
+  │   └── zwitch@2.0.4
+  ├─┬ @shikijs/transformers@4.3.1
+  │ ├── @shikijs/core@4.3.1 deduped
+  │ └── @shikijs/types@4.3.1 deduped
+  ├─┬ @shikijs/types@4.3.1
+  │ ├── @shikijs/vscode-textmate@10.0.2 deduped
+  │ └── @types/hast@3.0.4 deduped
+  ├─┬ @types/markdown-it@14.1.2
+  │ ├── @types/linkify-it@5.0.0
+  │ └── @types/mdurl@2.0.0
+  ├─┬ @vitejs/plugin-vue@6.0.7
+  │ ├── @rolldown/pluginutils@1.0.1
+  │ ├── vite@8.1.3 deduped
+  │ └── vue@3.5.39 deduped
+  ├─┬ @vue/devtools-api@8.1.5
+  │ └─┬ @vue/devtools-kit@8.1.5
+  │   ├── @vue/devtools-shared@8.1.5
+  │   ├── birpc@2.9.0
+  │   ├── hookable@5.5.3
+  │   └── perfect-debounce@2.1.0
+  ├── @vue/shared@3.5.39
+  ├─┬ @vueuse/core@14.3.0
+  │ ├── @types/web-bluetooth@0.0.21
+  │ ├── @vueuse/metadata@14.3.0
+  │ ├─┬ @vueuse/shared@14.3.0
+  │ │ └── vue@3.5.39 deduped
+  │ └── vue@3.5.39 deduped
+  ├─┬ @vueuse/integrations@14.3.0
+  │ ├── @vueuse/core@14.3.0 deduped
+  │ ├── @vueuse/shared@14.3.0 deduped
+  │ ├── UNMET OPTIONAL DEPENDENCY async-validator@^4
+  │ ├── UNMET OPTIONAL DEPENDENCY axios@^1
+  │ ├── UNMET OPTIONAL DEPENDENCY change-case@^5
+  │ ├── UNMET OPTIONAL DEPENDENCY drauu@^0.4
+  │ ├── focus-trap@8.2.2 deduped
+  │ ├── UNMET OPTIONAL DEPENDENCY fuse.js@^7
+  │ ├── UNMET OPTIONAL DEPENDENCY idb-keyval@^6
+  │ ├── UNMET OPTIONAL DEPENDENCY jwt-decode@^4
+  │ ├── UNMET OPTIONAL DEPENDENCY nprogress@^0.2
+  │ ├── UNMET OPTIONAL DEPENDENCY qrcode@^1.5
+  │ ├── UNMET OPTIONAL DEPENDENCY sortablejs@^1
+  │ ├── UNMET OPTIONAL DEPENDENCY universal-cookie@^7 || ^8
+  │ └── vue@3.5.39 deduped
+  ├─┬ focus-trap@8.2.2
+  │ └── tabbable@6.5.0
+  ├── mark.js@8.11.1
+  ├── UNMET OPTIONAL DEPENDENCY markdown-it-mathjax3@^4
+  ├── minisearch@7.2.0
+  ├─┬ postcss@8.5.16
+  │ ├── nanoid@3.3.15
+  │ ├── picocolors@1.1.1
+  │ └── source-map-js@1.2.1
+  ├─┬ shiki@4.3.1
+  │ ├── @shikijs/core@4.3.1 deduped
+  │ ├─┬ @shikijs/engine-javascript@4.3.1
+  │ │ ├── @shikijs/types@4.3.1 deduped
+  │ │ ├── @shikijs/vscode-textmate@10.0.2 deduped
+  │ │ └─┬ oniguruma-to-es@4.3.6
+  │ │   ├── oniguruma-parser@0.12.2
+  │ │   ├─┬ regex-recursion@6.0.2
+  │ │   │ └── regex-utilities@2.3.0
+  │ │   └─┬ regex@6.1.0
+  │ │     └── regex-utilities@2.3.0 deduped
+  │ ├─┬ @shikijs/engine-oniguruma@4.3.1
+  │ │ ├── @shikijs/types@4.3.1 deduped
+  │ │ └── @shikijs/vscode-textmate@10.0.2 deduped
+  │ ├─┬ @shikijs/langs@4.3.1
+  │ │ └── @shikijs/types@4.3.1 deduped
+  │ ├─┬ @shikijs/themes@4.3.1
+  │ │ └── @shikijs/types@4.3.1 deduped
+  │ ├── @shikijs/types@4.3.1 deduped
+  │ ├── @shikijs/vscode-textmate@10.0.2 deduped
+  │ └── @types/hast@3.0.4 deduped
+  ├─┬ vite@8.1.3
+  │ ├── UNMET OPTIONAL DEPENDENCY @types/node@^20.19.0 || >=22.12.0
+  │ ├── UNMET OPTIONAL DEPENDENCY @vitejs/devtools@^0.3.0
+  │ ├── UNMET OPTIONAL DEPENDENCY esbuild@^0.27.0 || ^0.28.0
+  │ ├── fsevents@2.3.3
+  │ ├── UNMET OPTIONAL DEPENDENCY jiti@>=1.21.0
+  │ ├── UNMET OPTIONAL DEPENDENCY less@^4.0.0
+  │ ├─┬ lightningcss@1.32.0
+  │ │ ├── detect-libc@2.1.2
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-android-arm64@1.32.0
+  │ │ ├── lightningcss-darwin-arm64@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-darwin-x64@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-freebsd-x64@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-linux-arm-gnueabihf@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-linux-arm64-gnu@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-linux-arm64-musl@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-linux-x64-gnu@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-linux-x64-musl@1.32.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY lightningcss-win32-arm64-msvc@1.32.0
+  │ │ └── UNMET OPTIONAL DEPENDENCY lightningcss-win32-x64-msvc@1.32.0
+  │ ├── picomatch@4.0.5
+  │ ├── postcss@8.5.16 deduped
+  │ ├─┬ rolldown@1.1.4
+  │ │ ├── @oxc-project/types@0.138.0
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-android-arm64@1.1.4
+  │ │ ├── @rolldown/binding-darwin-arm64@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-darwin-x64@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-freebsd-x64@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-arm-gnueabihf@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-arm64-gnu@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-arm64-musl@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-ppc64-gnu@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-s390x-gnu@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-x64-gnu@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-linux-x64-musl@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-openharmony-arm64@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-wasm32-wasi@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-win32-arm64-msvc@1.1.4
+  │ │ ├── UNMET OPTIONAL DEPENDENCY @rolldown/binding-win32-x64-msvc@1.1.4
+  │ │ └── @rolldown/pluginutils@1.0.1 deduped
+  │ ├── UNMET OPTIONAL DEPENDENCY sass-embedded@^1.70.0
+  │ ├── UNMET OPTIONAL DEPENDENCY sass@^1.70.0
+  │ ├── UNMET OPTIONAL DEPENDENCY stylus@>=0.54.8
+  │ ├── UNMET OPTIONAL DEPENDENCY sugarss@^5.0.0
+  │ ├── UNMET OPTIONAL DEPENDENCY terser@^5.16.0
+  │ ├─┬ tinyglobby@0.2.17
+  │ │ ├─┬ fdir@6.5.0
+  │ │ │ └── picomatch@4.0.5 deduped
+  │ │ └── picomatch@4.0.5 deduped
+  │ ├── UNMET OPTIONAL DEPENDENCY tsx@^4.8.1
+  │ └── UNMET OPTIONAL DEPENDENCY yaml@^2.4.2
+  └─┬ vue@3.5.39
+    ├─┬ @vue/compiler-dom@3.5.39
+    │ ├─┬ @vue/compiler-core@3.5.39
+    │ │ ├── @babel/parser@7.29.7 deduped
+    │ │ ├── @vue/shared@3.5.39 deduped
+    │ │ ├── entities@7.0.1
+    │ │ ├── estree-walker@2.0.2 deduped
+    │ │ └── source-map-js@1.2.1 deduped
+    │ └── @vue/shared@3.5.39 deduped
+    ├─┬ @vue/compiler-sfc@3.5.39
+    │ ├─┬ @babel/parser@7.29.7
+    │ │ └─┬ @babel/types@7.29.7
+    │ │   ├── @babel/helper-string-parser@7.29.7
+    │ │   └── @babel/helper-validator-identifier@7.29.7
+    │ ├── @vue/compiler-core@3.5.39 deduped
+    │ ├── @vue/compiler-dom@3.5.39 deduped
+    │ ├─┬ @vue/compiler-ssr@3.5.39
+    │ │ ├── @vue/compiler-dom@3.5.39 deduped
+    │ │ └── @vue/shared@3.5.39 deduped
+    │ ├── @vue/shared@3.5.39 deduped
+    │ ├── estree-walker@2.0.2
+    │ ├─┬ magic-string@0.30.21
+    │ │ └── @jridgewell/sourcemap-codec@1.5.5
+    │ ├── postcss@8.5.16 deduped
+    │ └── source-map-js@1.2.1 deduped
+    ├─┬ @vue/runtime-dom@3.5.39
+    │ ├─┬ @vue/reactivity@3.5.39
+    │ │ └── @vue/shared@3.5.39 deduped
+    │ ├─┬ @vue/runtime-core@3.5.39
+    │ │ ├── @vue/reactivity@3.5.39 deduped
+    │ │ └── @vue/shared@3.5.39 deduped
+    │ ├── @vue/shared@3.5.39 deduped
+    │ └── csstype@3.2.3
+    ├─┬ @vue/server-renderer@3.5.39
+    │ ├── @vue/compiler-ssr@3.5.39 deduped
+    │ ├── @vue/shared@3.5.39 deduped
+    │ └── vue@3.5.39 deduped
+    ├── @vue/shared@3.5.39 deduped
+    └── UNMET OPTIONAL DEPENDENCY typescript@*
+

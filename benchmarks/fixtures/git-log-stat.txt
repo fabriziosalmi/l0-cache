@@ -1,0 +1,1390 @@
+commit f3ea21a8e3b8a10f5e2ba0560e74a8c8ca5eb749
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Tue Jul 7 08:56:43 2026 +0200
+
+    docs: expanded comparison matrix, 0.2.0 refresh, fix table-clipping CSS
+    
+    README: comparison moved to the top and rebuilt from a repo-verified survey
+    (2026-07-07) — 9 same-layer tools across two matrices (mechanism/coverage/
+    claims + operational features), adjacent-layer table, and an explicit
+    "where l0-compressor is behind" section; neutral tone, no marketing claims.
+    Stale facts fixed (versions, aliases, guard scope, test counts, hardening).
+    
+    Docs: filter-pipeline rewritten to the actual 6-stage execution order
+    (read-time normalization + DiffCollapse were undocumented), hardening page
+    updated with 0.1.13-0.1.15 items (guard adversarial suite, recovery symlink
+    hardening, multibyte fix), architecture module table completed, env vars
+    completed with deprecated L0_CACHE_* fallbacks, l0-cache migration note.
+    
+    CSS: .vp-doc table overflow hidden -> auto (wide tables were clipped on
+    narrow viewports with no way to scroll). Screenshot regenerated with
+    l0-compressor branding from the real 0.2.0 binary on isolated telemetry.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+ README.md                         | 207 ++++++++++++++++++++++++++------------
+ docs/.vitepress/theme/custom.css  |   4 +-
+ docs/guide/configuration.md       |  11 +-
+ docs/guide/index.md               |  23 ++++-
+ docs/guide/installation.md        |  19 +++-
+ docs/index.md                     |   8 +-
+ docs/internals/architecture.md    |   9 +-
+ docs/internals/filter-pipeline.md |  42 ++++++--
+ docs/internals/hardening.md       |  26 +++++
+ docs/public/screenshot.png        | Bin 100692 -> 204768 bytes
+ docs/reference/index.md           |  17 +++-
+ docs/reference/metrics.md         |   2 +-
+ 12 files changed, 276 insertions(+), 92 deletions(-)
+
+commit a271b8e9c1bc1c66ad3fb316e73cb80550cd761d
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Tue Jul 7 06:50:35 2026 +0200
+
+    chore: bump Homebrew formula to v0.2.0 and pin source sha256
+    
+    Re-pin the formula to the real v0.2.0 source tarball checksum
+    (8a4a18e1…40d8); the rename commit carried the stale v0.1.15 pin. Follows
+    the established post-tag convention (this commit is not itself tagged;
+    brew reads the formula from master HEAD).
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+ Formula/l0-compressor.rb | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+commit e0cb9aaf9a3c71e97d9a75579f9562e0dea4b813
+Author: fab <fabrizio.salmi@gmail.com>
+Date:   Tue Jul 7 07:23:03 2026 +0200
+
+    rename: l0-cache → l0-compressor, cut 0.2.0 (#6)
+    
+    The name never matched the tool — there is no cache; it's a universal
+    command-output compressor (head/tail, collapse, diff-aware filtering).
+    Rename to l0-compressor, matching the l0_compressor plugin already used
+    downstream in llmproxy, and bump to 0.2.0 as the first release under the
+    new name.
+    
+    - Binary: l0-compressor, with l0-comp short alias (legacy t alias kept).
+    - Env vars: L0_COMPRESSOR_* everywhere, with the two runtime knobs
+      (GUARD, NO_TELEMETRY) still honoring the pre-rename L0_CACHE_* names as
+      a deprecated fallback so existing hooks/integrations don't break.
+    - Data/config dirs moved to …/l0-compressor/ with a one-time,
+      non-destructive migration from the legacy …/l0-cache/ path (renames
+      only when the new dir is absent; never deletes).
+    - Homebrew formula renamed (class L0Compressor); install.sh,
+      install-binary.sh, and make install create the l0-comp alias.
+    - Docs, CI, release workflow, and completions updated to the new name.
+    
+    Formula url bumped to v0.2.0; its sha256 must be re-pinned after the tag
+    is pushed (flagged in-formula). GitHub repo rename + local dir mv are
+    separate manual steps.
+    
+    Co-authored-by: Claude Fable 5 <noreply@anthropic.com>
+
+ .github/workflows/ci.yml          |   6 +-
+ .github/workflows/release.yml     |  10 +-
+ CHANGELOG.md                      |  27 +++++
+ CONTRIBUTING.md                   |   8 +-
+ Cargo.lock                        |   4 +-
+ Cargo.toml                        |  10 +-
+ Formula/l0-cache.rb               |  47 ---------
+ Formula/l0-compressor.rb          |  51 ++++++++++
+ Makefile                          |  31 +++---
+ README.md                         | 122 +++++++++++-----------
+ SECURITY.md                       |   6 +-
+ agent-hook.sh                     |  26 ++---
+ agent-rules.sh                    |  34 +++----
+ benchmark.sh                      |  24 ++---
+ build.rs                          |   7 +-
+ claude-hook.sh                    |  32 +++---
+ docs/.vitepress/config.mts        |   8 +-
+ docs/.vitepress/theme/custom.css  |   2 +-
+ docs/guide/claude-code.md         |  32 +++---
+ docs/guide/configuration.md       |  26 ++---
+ docs/guide/index.md               |   4 +-
+ docs/guide/installation.md        |  40 ++++----
+ docs/guide/quickstart.md          |  30 +++---
+ docs/index.md                     |   6 +-
+ docs/internals/architecture.md    |   4 +-
+ docs/internals/cross-platform.md  |  14 +--
+ docs/internals/filter-pipeline.md |   6 +-
+ docs/internals/hardening.md       |  10 +-
+ docs/reference/exit-codes.md      |  22 ++--
+ docs/reference/index.md           |  16 +--
+ docs/reference/metrics.md         |   8 +-
+ install-binary.sh                 |  33 +++---
+ install.sh                        | 110 ++++++++++----------
+ package-lock.json                 |   2 +-
+ src/args.rs                       |   4 +-
+ src/config.rs                     |  32 ++++--
+ src/main.rs                       |  67 +++++++-----
+ src/recovery.rs                   |  10 +-
+ src/runner.rs                     |  10 +-
+ src/telemetry/doctor.rs           |  34 ++++---
+ src/telemetry/guard.rs            |  19 ++--
+ src/telemetry/metric.rs           |  24 +++--
+ src/telemetry/mod.rs              |   6 +-
+ src/telemetry/paths.rs            |  33 ++++--
+ src/telemetry/stats/agg.rs        |   4 +-
+ src/telemetry/stats/render.rs     |  12 +--
+ src/telemetry/tests.rs            |  10 +-
+ src/telemetry/tuned.rs            |  14 ++-
+ src/ui.rs                         |   2 +-
+ tests/integration.rs              | 208 +++++++++++++++++++-------------------
+ 50 files changed, 714 insertions(+), 593 deletions(-)
+
+commit 28a6e00e7e49eb1a6b01c3d5b1b27f5fbadc9632
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 18:20:50 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.15 and pin source sha256
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit 6bdb70974ab6536ed91b0d16d879b45db8bc5c06
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 18:20:06 2026 +0200
+
+    Release 0.1.15 — hardening: multibyte-crash fix, /tmp recovery hardening, hot-path perf
+    
+    Bumps the version, finalizes the CHANGELOG [Unreleased] → [0.1.15].
+    
+    Highlight since 0.1.14: fixed a multibyte-output panic that aborted the wrapper
+    and swallowed the child's exit code; hardened the --recover temp file against a
+    shared-/tmp symlink attack (0700 dir, 0600 + O_NOFOLLOW file); trimmed the
+    per-line filter hot path (single error-signal scan, non-allocating fuzzy compare,
+    non-quadratic binary detection).
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md | 2 +-
+ Cargo.lock   | 2 +-
+ Cargo.toml   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+commit dfa355d21e787487a47fdbf6323c72cab8f4fda0
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 17:40:04 2026 +0200
+
+    harden: fix multibyte-output crash + recovery /tmp symlink attack; trim hot-path
+    
+    Three parallel audits (security/performance/robustness), findings verified
+    against the code before fixing.
+    
+    CRITICAL crash: skip_timestamp sliced arbitrary child output at fixed byte
+    offsets (&s[0..3], &s[15..]); a multibyte char (€/emoji/CJK) straddling offset
+    3 or 15 panicked, aborting the wrapper and swallowing the child's exit code
+    (verified: exit 7 → 101). Now char-boundary-safe via get(..). This violated the
+    project's core "never break the wrapped command" invariant.
+    
+    SECURITY: the --recover temp file at a predictable $TMPDIR/l0-cache/recovery-
+    <cmd>-<pid>.log used File::create (symlink-following, default perms) in a shared
+    /tmp — local symlink clobber + world-readable secrets. Now dir 0700 (rejected if
+    symlink/other-owned), file 0600 + O_NOFOLLOW (Unix; Windows temp is per-user).
+    
+    PERF (per-line hot path): compute has_error_signal once/line instead of up to
+    14x + per-line auto-tune phrase scans; non-allocating fuzzy-signature compare
+    (was 2 Strings/line); binary detection validates only the new line (was O(n^2)
+    re-validation of the growing 8KB prefix).
+    
+    Adds regression tests: multibyte-boundary safety, fuzzy-signature semantics,
+    recovery file 0600/dir 0700, and symlink-refusal (O_NOFOLLOW). Audited-and-clean:
+    shell_escape, secret redaction, ANSI sanitization, unsafe libc, memory bounds.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md    |  40 +++++++++++++++++++
+ src/filter.rs   | 119 ++++++++++++++++++++++++++++++++++++++++++++-----------
+ src/recovery.rs | 121 +++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ src/runner.rs   |   9 ++++-
+ 4 files changed, 259 insertions(+), 30 deletions(-)
+
+commit 1710f90de42e919880764e940a3046261df92f4c
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 15:48:47 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.14 and pin source sha256
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit 8d0196e050a327a53d12d6d0f1245f38c82803b5
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 15:47:52 2026 +0200
+
+    Release 0.1.14 — guard hardening: close 5 rm -rf obfuscation classes
+    
+    Bumps the version, finalizes the CHANGELOG [Unreleased] → [0.1.14].
+    
+    Highlight since 0.1.13: an adversarial 161-case sandbox drove hardening of the
+    destructive-rm guard against `..` traversal, home parents (/home, /Users),
+    nested `sh -c`, env/wrapper prefixes, and `~user`. Residual lint limits are now
+    documented explicitly. Still a best-effort seatbelt, not a security boundary.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md | 2 +-
+ Cargo.lock   | 2 +-
+ Cargo.toml   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+commit bdb6841b4deaee378b9a0e2853612eba482f7edd
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 15:42:55 2026 +0200
+
+    harden(guard): close 5 rm -rf obfuscation classes; add 161-case adversarial sandbox
+    
+    An adversarial sandbox (decision-level, never spawns a real rm) threw 100+
+    destructive rm -rf spellings at the guard. It resisted every straight form but
+    surfaced five real bypass classes; this closes them:
+    
+    - `..` traversal: lexically resolve `.`/`..` before matching (/etc/../etc → /etc)
+    - home parents: protect /home and /Users (+ C:\Users, /c/Users) — wipe-all-users
+    - nested sh -c: recursively unwrap `bash -c "bash -c '...'"` (bounded depth)
+    - wrapper/env prefixes: classify by effective cmd (env/sudo/FOO=1 rm -rf ...)
+    - ~user: block another account's home (rm -rf ~root)
+    
+    Adds sandbox_rm_rf_in_100_ways (161 block cases + benign control), an advanced
+    regression net for the five classes, and a test pinning the documented lint
+    limits (command substitution/eval, glob, xargs-from-stdin, find -delete). The
+    module doc-comment now states coverage and residual limits honestly: a seatbelt
+    against accidents, not a security boundary. --no-guard / L0_CACHE_GUARD=0 unchanged.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md           |  33 ++++++
+ src/telemetry/guard.rs | 236 ++++++++++++++++++++++++++++++++------
+ src/telemetry/tests.rs | 302 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 539 insertions(+), 32 deletions(-)
+
+commit 41c2e28d6c9df662fd42119e352a9cf6007a5699
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 11:45:56 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.13 and pin source sha256
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit 566c08d0af841937b4315f9743f78aa053f74d0e
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 11:44:17 2026 +0200
+
+    Release 0.1.13 — guard protects HOME and closes the quote-insertion bypass
+    
+    Bumps the version, finalizes the CHANGELOG [Unreleased] → [0.1.13].
+    
+    Highlight since 0.1.12:
+    - fix(guard): recursive rm now blocks the user's HOME and its data folders
+      (Documents, Desktop, …) across Linux/macOS/Windows, plus literal ~/$HOME,
+      and de-obfuscates bash -c payloads so quote-insertion (r"m" -"r"f) no longer
+      bypasses. Still a best-effort lint; opt out with --no-guard / L0_CACHE_GUARD=0.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md | 2 +-
+ Cargo.lock   | 2 +-
+ Cargo.toml   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+commit 8106be5a6b5c704130982d87addd8252c91d815a
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 11:40:38 2026 +0200
+
+    fix(guard): protect HOME and user-data dirs from rm -rf, close quote-insertion bypass
+    
+    The destructive-command guard only covered system roots (/, /etc, /usr, …),
+    so `rm -rf ~`, `rm -rf $HOME`, and `rm -rf ~/Documents` passed the guard and
+    executed (a real incident). Extend the recursive force-remove check to also
+    block:
+    
+    - the HOME resolved at runtime from the environment ($HOME / %USERPROFILE% /
+      HOMEDRIVE+HOMEPATH), both the exact path and its `…/*` glob;
+    - its first-level data folders (Documents, Desktop, Downloads, Pictures,
+      Movies, Music, and the Linux XDG Videos/Public/Templates);
+    - literal, un-expanded `~`, `$HOME`, `${HOME}`, `%USERPROFILE%` references
+      that reach the bash -c re-scan without a shell expanding them first.
+    
+    Coverage is cross-OS: Linux (/home/<user>, XDG), macOS (/Users/<user>), and
+    Windows (C:\Users\<user>, backslashes, drive letters, and the /c/Users form
+    used by Git Bash / MSYS) all normalize to a common comparison form.
+    
+    The bash -c / sh -c re-scan now tokenizes the payload with a minimal
+    quote-aware de-obfuscator (removing '…'/"…" quotes, honoring `\` escapes)
+    before matching, so `bash -c 'r"m" -"r"f /etc'` recomposes to `rm -rf /etc`
+    and is blocked; plain split_whitespace previously let it through.
+    
+    Home directories are injected via check_dangerous_command_with_homes so the
+    regression tests simulate each OS layout deterministically without mutating
+    the shared process environment. The guard stays a best-effort lint (no var
+    expansion, command substitution, or symlink resolution) with the existing
+    --no-guard / L0_CACHE_GUARD=0 opt-out.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md           |  31 ++++++
+ src/telemetry/guard.rs | 295 ++++++++++++++++++++++++++++++++++++++++++++-----
+ src/telemetry/mod.rs   |   4 +-
+ src/telemetry/tests.rs | 142 ++++++++++++++++++++++++
+ 4 files changed, 446 insertions(+), 26 deletions(-)
+
+commit cfbbee37de88e05274cd925dee0cf18352771adb
+Author: FabGPT <fabgpt.inbox@gmail.com>
+Date:   Wed Jun 24 22:54:16 2026 +0200
+
+    Add input validation for `since_is_valid` to reject empty strings (#5)
+    
+    The `since_is_valid` function currently trims input and rejects leading `+`, but does not explicitly reject empty strings. An empty string (`""`) would pass `s.trim()` and `parse_since` (which returns `None` for empty input), resulting in `!None.is_some()` → `true`, incorrectly marking empty input as valid. This could lead to misleading dashboard headers or unexpected behavior in downstream logic that assumes a non-empty window specification.
+    
+    Signed-off-by: fabgpt-coder <276921870+fabgpt-coder@users.noreply.github.com>
+    Co-authored-by: fabgpt-coder <276921870+fabgpt-coder@users.noreply.github.com>
+
+ src/telemetry/mod.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit 4a22ddb09a69919b3a453e945eb54b1b66a54105
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jun 24 09:52:43 2026 +0200
+
+    build(deps): force esbuild >=0.25 to clear docs dev-server advisories
+    
+    Dependabot flagged 4 advisories in the VitePress docs npm tree (the Rust
+    crate is unaffected; cargo audit is clean). An `overrides` pin bumps esbuild
+    0.21.5 -> 0.25.12 under vite 5.4.21, clearing two of them: the esbuild
+    dev-server request advisory (GHSA-67mh-4wv8-2f99) and vite's `.map`
+    path-traversal (GHSA-4w7w-66w2-5vf9). `vitepress build` verified green.
+    
+    The remaining two are Windows-only, dev-server-time vite advisories
+    (`server.fs.deny` bypass GHSA-fx2h-pf6j-xcff; launch-editor NTLM
+    GHSA-v6wh-96g9-6wx3) with no fix compatible with vitepress 1.6.4, which
+    pins vite ^5.4.14 — 5.4.21 is the latest 5.x and still in range. Accepted:
+    docs build on macOS to static HTML, so real-world impact is nil. Revisit
+    when vitepress 2.0 ships stable (pulls a patched vite 6/7).
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+ package-lock.json | 292 ++++++++++++++++++++++++++++++++----------------------
+ package.json      |   3 +
+ 2 files changed, 176 insertions(+), 119 deletions(-)
+
+commit 64a6357bf1d82aa308cff3ab09ff809d2ab8c9a2
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jun 24 09:40:51 2026 +0200
+
+    docs: cover clean-success squelch + telemetry module split (0.1.12)
+    
+    The docs site was pinned at 0.1.11. Two 0.1.12 changes were undocumented:
+    the clean-success squelch (0431c54) and the telemetry module split (c77afda).
+    README already covered the squelch; this brings the VitePress site in line.
+    
+    - reference: new `--no-squelch` flag entry, gated by the `--only-errors` keyword set
+    - configuration: "Clean-success squelch" section, tuning-table row, `squelch` config key
+    - filter-pipeline: squelch render-time gate (halve, floor 5, sticky signal, honest banner)
+    - architecture: telemetry module map now `src/telemetry/` with its submodules
+    - metrics: example `version` stamp 0.1.11 -> 0.1.12
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+ docs/guide/configuration.md       | 21 ++++++++++++++++++++-
+ docs/internals/architecture.md    |  2 +-
+ docs/internals/filter-pipeline.md | 14 ++++++++++++++
+ docs/reference/index.md           |  8 ++++++++
+ docs/reference/metrics.md         |  2 +-
+ 5 files changed, 44 insertions(+), 3 deletions(-)
+
+commit 80b573a74751191c0efd7f5939337fe5c06d5de3
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Tue Jun 23 10:00:18 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.12 and pin source sha256
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit bd95e1272fe13786d88ec3735e88a14bd5737bdb
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Tue Jun 23 09:57:46 2026 +0200
+
+    Release 0.1.12 — clean-success squelch + telemetry modularization
+    
+    Bumps the version, finalizes the CHANGELOG [Unreleased] → [0.1.12].
+    
+    Highlights since 0.1.11:
+    - feat: clean-success squelch (trim the tail on a signal-free zero exit),
+      with the honest-banner fix that reports the actual tail shown.
+    - refactor: telemetry/mod.rs split into focused submodules (5313 → 71 lines).
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md | 2 +-
+ Cargo.lock   | 2 +-
+ Cargo.toml   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+commit 0431c549c88948456098eb002d4141296daef047
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Tue Jun 23 09:18:03 2026 +0200
+
+    feat: clean-success squelch — trim the tail on a signal-free zero exit
+    
+    On a clean exit (0) with no error/warning signal anywhere in the stream,
+    the displayed tail is trimmed to half (floored at 5 lines): the middle of a
+    clean build/test/install is progress noise and the agent rarely needs 30
+    tail lines to confirm success. The head (command echo) is always kept and
+    the final summary line always survives. Any error/warn/fail/exception/panic/
+    traceback/fatal signal — or a non-zero exit — restores the full tail, so
+    failures stay completely visible (mirrors the safety guarantee that the
+    failure path is never squelched).
+    
+    On by default; opt out with `--no-squelch` or `squelch = false` in
+    per-command config. The error-signal keyword set is now shared between the
+    `--only-errors` filter and the squelch gate so the two can never disagree.
+    
+    Honesty fix: the truncation banner now reports the ACTUAL tail shown, not
+    the configured cap — the runner returns the rendered `display_tail` and the
+    banner prints it (`30 head + 15 tail`, never a fabricated `30 tail`).
+    
+    Tests: filter unit tests (has_error_signal, squelched_tail math, sticky
+    error-signal tracking across the whole stream), runner tests (squelch trims
+    clean success, backs off on a warning, never touches failures), and an
+    integration test asserting both behaviour and banner honesty. The three
+    auto-tuning e2e tests that assert the tuned tail CAP now pin `--no-squelch`
+    so the squelch can't trim the displayed tail out from under their banner
+    assertions.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md         |  24 +++++++++
+ README.md            |   9 ++++
+ src/args.rs          |   5 ++
+ src/config.rs        |   4 ++
+ src/filter.rs        | 127 ++++++++++++++++++++++++++++++++++++++++------
+ src/main.rs          |  13 +++--
+ src/runner.rs        | 139 ++++++++++++++++++++++++++++++++++++++++++++++++---
+ tests/integration.rs |  71 ++++++++++++++++++++++----
+ 8 files changed, 354 insertions(+), 38 deletions(-)
+
+commit c77afdabf4162d951b38dbc2b6824f5fb44fecb1
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Tue Jun 23 08:56:36 2026 +0200
+
+    refactor: split telemetry/mod.rs into focused submodules
+    
+    `telemetry/mod.rs` had grown to 5313 lines. Break it into a thin facade
+    (71 lines) plus cohesive submodules, with no behaviour change — the full
+    suite (289 + 45 tests) stays green and the binary smoke-tests identically.
+    
+    New layout under src/telemetry/:
+    - lock.rs       FileLock (flock/mkdir advisory lock)
+    - paths.rs      data_dir + metrics/tuned sidecar paths
+    - tuned.rs      TunedParams + persistence (lookup/save/compaction, TTL)
+    - metric.rs     ExecutionMetric/RunMetrics, append_metric, reset_stats
+    - adaptive.rs   adaptive auto-tuning engine (decay/shrink/recover)
+    - stats/agg.rs  metric aggregation + shared CmdStats/StatsAgg data model
+    - stats/render.rs  --stats/--discover dashboard, JSON, number formatting
+    - doctor.rs     run_doctor diagnostics
+    - tests.rs      the 126-test module, relocated verbatim
+    
+    mod.rs keeps the datetime/since facade helpers and re-exports each
+    submodule. Cross-boundary items are pub(crate); the StatsAgg/CmdStats
+    fields become pub(crate) as the explicit agg<->render data contract.
+    
+    cargo fmt clean, cargo clippy --all-targets zero warnings.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ src/telemetry/adaptive.rs     |  703 ++++++
+ src/telemetry/doctor.rs       |  391 +++
+ src/telemetry/lock.rs         |  123 +
+ src/telemetry/metric.rs       |  282 +++
+ src/telemetry/mod.rs          | 5294 +----------------------------------------
+ src/telemetry/paths.rs        |   79 +
+ src/telemetry/stats/agg.rs    |  347 +++
+ src/telemetry/stats/mod.rs    |   10 +
+ src/telemetry/stats/render.rs |  623 +++++
+ src/telemetry/tests.rs        | 2529 ++++++++++++++++++++
+ src/telemetry/tuned.rs        |  210 ++
+ 11 files changed, 5323 insertions(+), 5268 deletions(-)
+
+commit c6b919411e4f8e143dbe539ce04a2a18b8b97c38
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 11 00:27:52 2026 +0200
+
+    ci: serialize release matrix via max-parallel instead of a concurrency group
+    
+    A job-level concurrency group holds at most one PENDING job: with a 3-leg
+    matrix the third leg gets cancelled instead of queued (v0.1.11 lost its
+    x86_64-apple-darwin asset until a manual re-run). strategy.max-parallel: 1
+    serializes the legs natively with no queue-eviction semantics.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+ .github/workflows/release.yml | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+commit 769550d111add6d0b650621a38ff67f225aa9f4f
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 11 00:24:59 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.11 and pin source sha256
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit 1b631b1533acc9763bdf5cb01477ad852188d033
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 11 00:23:51 2026 +0200
+
+    Release 0.1.11 — stats/telemetry audit remediation + honest dashboard
+    
+    Two adversarial multi-agent audits (40+40 verified findings) fixed one at
+    a time, each with its own verification step.
+    
+    Data integrity: integration tests no longer write to the user's real
+    metrics.jsonl (90%+ of the headline was test artifacts); unknown leading
+    flags are rejected before any metric write; secrets no longer leak through
+    the cmd field for NAME=value-prefixed commands; sh -c records keep cmd and
+    args on the same layer; tampered records are clamped at ingestion.
+    
+    Auto-tuning: new recover_defaults un-ratchet rule (clean streak restores
+    the configured base; proactive_shrink seeds excluded; tag-overwrite cannot
+    mask it); 30-day TTL with future-skew guard on persisted tunes; tuned.jsonl
+    compacted on write with degraded-append fallback; no-op (floor/ceiling
+    pinned) triggers no longer counted as firings (~13x inflation).
+    
+    Dashboard: IMPACT bar is share-of-total-savings (sqrt-scaled); Median/run
+    row + >50% dominance disclosure; 100.0% reserved for fully-elided output;
+    deterministic ordering; legend for the mix abbreviations; est. tokens unit
+    label; (n<5) qualifier; red tier == hint threshold (shared constant);
+    terminal-width-aware layout with display-column CJK math; rendering is a
+    pure String function with 20+ new unit tests.
+    
+    Infra: flock(2) on its own .flock path (mixed-version safe, crash-released);
+    --reset-stats deletes tuned.jsonl and lock artifacts; --since validated in
+    every mode (BREAKING: exit 2 on invalid values); L0_CACHE_NO_TELEMETRY kill
+    switch; hook skip-lists gain zero-output builtins; docs/CHANGELOG aligned
+    with six rules and the compaction semantics.
+    
+    Suite: 289 unit + 45 integration tests; clippy -D warnings clean.
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+ CHANGELOG.md                |  118 ++++
+ Cargo.lock                  |    2 +-
+ Cargo.toml                  |    2 +-
+ README.md                   |   52 +-
+ agent-hook.sh               |    1 +
+ claude-hook.sh              |    1 +
+ docs/guide/configuration.md |   35 +-
+ docs/guide/quickstart.md    |   40 +-
+ docs/reference/index.md     |   68 +-
+ docs/reference/metrics.md   |   33 +-
+ src/args.rs                 |  181 ++++-
+ src/main.rs                 |   51 +-
+ src/telemetry/mod.rs        | 1603 +++++++++++++++++++++++++++++++++++++++----
+ src/ui.rs                   |  167 ++++-
+ tests/integration.rs        |  294 ++++++++
+ 15 files changed, 2406 insertions(+), 242 deletions(-)
+
+commit d9ea5ce98c897eb588200c46593060ca1c8207e9
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jun 10 18:55:00 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.10 and pin source sha256
+    
+    Tag was re-pushed (clean rebuild of the release after the matrix-race
+    fix), so the source-tarball checksum is regenerated against the final
+    v0.1.10 archive.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+commit 28b7178242a39b4a0c1dd2e72d0e0efb56da3b8c
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jun 10 18:28:39 2026 +0200
+
+    ci: serialize release.yml matrix to avoid GH release-create race
+    
+    The v0.1.10 push triggered three matrix jobs that each invoked
+    softprops/action-gh-release@v2 in parallel. The action races on
+    "find or create release for tag", which produced a duplicate Draft
+    release (337348308) alongside the real one (337348305) and a 401
+    when one job tried to clean up the other's draft. Net result: the
+    aarch64-apple-darwin tarball never made it onto the release.
+    
+    Adding a job-level concurrency block with a static group serializes
+    the three matrix variants so only one ever calls the action at a
+    time. Workflow-level concurrency wouldn't help here — that only
+    blocks a second run of the same workflow on the same ref, not the
+    matrix.
+    
+    The aarch64 tarball for v0.1.10 was uploaded out-of-band; this fix
+    just stops the race from happening again on the next tag.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/release.yml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+commit c4080e9a9642de1e6ad407d27bda8f4971777f0e
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jun 10 18:13:36 2026 +0200
+
+    Release 0.1.10 — adaptive auto-tuning audit: visibility + 4 rule fixes + persistence
+
+ CHANGELOG.md                   |   54 ++
+ Cargo.lock                     |    2 +-
+ Cargo.toml                     |    2 +-
+ Formula/l0-cache.rb            |    4 +-
+ README.md                      |   77 +-
+ docs/guide/configuration.md    |   85 +-
+ docs/internals/architecture.md |    5 +-
+ docs/reference/index.md        |   36 +-
+ docs/reference/metrics.md      |   65 +-
+ src/main.rs                    |   42 +-
+ src/telemetry/mod.rs           | 1701 +++++++++++++++++++++++++++++++++++++++-
+ tests/integration.rs           |  841 +++++++++++++++++++-
+ 12 files changed, 2819 insertions(+), 95 deletions(-)
+
+commit fee1312ee421474b24000911eb9b236cca20509c
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Mon Jun 8 16:24:58 2026 +0200
+
+    chore: bump Homebrew formula to v0.1.9 and pin source sha256
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+commit fba994b5a95b7d1e03b647d4d061c8db6391e0e3
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Mon Jun 8 16:23:43 2026 +0200
+
+    Release 0.1.9 — ship integration scripts via Homebrew + Claude/Gemini hook parity
+    
+    Homebrew now installs the integration setup scripts as namespaced commands
+    (l0-cache-claude-hook / l0-cache-agent-hook / l0-cache-agent-rules), so the
+    transparent hook works without cloning the repo. jq is now a runtime dependency.
+    
+    claude-hook.sh is brought to behavior-parity with agent-hook.sh: the generated
+    wrapper enables --recover and uses the same robust command extraction, so Claude
+    Code and Gemini CLI are managed the same way. Public CLIs are unchanged and the
+    ./claude-hook.sh clone flow stays byte-compatible.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md               | 20 ++++++++++++++++++++
+ Cargo.lock                 |  2 +-
+ Cargo.toml                 |  2 +-
+ Formula/l0-cache.rb        | 16 ++++++++++++++++
+ README.md                  | 10 ++++++++++
+ claude-hook.sh             | 10 ++++++----
+ docs/guide/installation.md |  8 ++++++++
+ 7 files changed, 62 insertions(+), 6 deletions(-)
+
+commit 5cfb7bb56af0039838ea7ac1ca57cf153949c572
+Merge: bfb0acd 7922638
+Author: fab <fabrizio.salmi@gmail.com>
+Date:   Sat Jun 6 21:05:57 2026 +0200
+
+    Merge pull request #4 from fabgpt-coder/fabgpt/quality-6d094e62
+    
+    Guard against empty git output to prevent invalid hash
+
+commit 792263819ca20d9d5bddac428daa41556bf5d4e6
+Author: fabgpt-coder <276921870+fabgpt-coder@users.noreply.github.com>
+Date:   Sat Jun 6 21:00:15 2026 +0200
+
+    Guard against empty git output to prevent invalid hash
+    
+    The current logic uses `trim()` on the git output, which will result in an empty string if the git command fails or returns no output (e.g., in a fresh repo with no commits). This causes the binary version to be 'unknown' instead of a valid fallback, potentially breaking version parsing logic in the application. Adding an explicit check for empty strings ensures the fallback 'unknown' is only used when no hash data exists.
+
+ build.rs | 1 +
+ 1 file changed, 1 insertion(+)
+
+commit bfb0acd8f9d81169aa76fab830f363aa2baa1463
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 10:10:51 2026 +0200
+
+    docs: native macOS minimal theme (SF fonts, Apple palette, frosted nav)
+    
+    Custom VitePress theme overriding the design tokens: San Francisco system fonts,
+    near-black/Apple-neutral surfaces with a single system-blue accent, true-black
+    dark mode, frosted-glass nav, softer radii/shadows, pill CTAs, and a solid (no
+    gradient) hero headline. Behavior unchanged — styling only.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ docs/.vitepress/theme/custom.css | 196 +++++++++++++++++++++++++++++++++++++++
+ docs/.vitepress/theme/index.ts   |   7 ++
+ 2 files changed, 203 insertions(+)
+
+commit ea75ec92aa5fe1046bfdf34f7fbba82ebab66fc6
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 10:06:13 2026 +0200
+
+    docs: add prebuilt-binary + Homebrew install methods to the docs site
+    
+    Mirror the README install section (v0.1.8): the VitePress installation guide
+    still showed only the from-source build.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ docs/guide/installation.md | 25 +++++++++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+commit 0957a22612943c95c86b7516e6e1b16fbeab3ae9
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 10:00:16 2026 +0200
+
+    chore: pin Homebrew formula to the v0.1.8 source sha256
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Formula/l0-cache.rb | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+commit 0277ffb9924723003be1b178e2845f956d695650
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 09:55:47 2026 +0200
+
+    Release 0.1.8 — prebuilt binaries (no-Rust install) + Homebrew formula
+    
+    ### Added
+    - CI workflow (.github/workflows/release.yml): on every tag, build macOS arm64/x64
+      and Linux x64 (static musl) binaries + SHA-256, attach to the GitHub Release.
+    - install-binary.sh: download + checksum-verify the right prebuilt binary into
+      ~/.local/bin (the `t` alias too) — no Rust toolchain needed.
+    - Formula/l0-cache.rb: Homebrew formula (brew tap <url> && brew install l0-cache).
+    - Cargo.toml repository/homepage metadata.
+    
+    Distribution quick-win: removes the "needs Rust to install" friction.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/release.yml | 55 +++++++++++++++++++++++++++++++
+ CHANGELOG.md                  | 13 ++++++++
+ Cargo.lock                    |  2 +-
+ Cargo.toml                    |  4 ++-
+ Formula/l0-cache.rb           | 31 ++++++++++++++++++
+ README.md                     | 20 ++++++++++--
+ install-binary.sh             | 76 +++++++++++++++++++++++++++++++++++++++++++
+ 7 files changed, 197 insertions(+), 4 deletions(-)
+
+commit 4cee7fb719d56c47e0cc1f348ce58e49fd2b6723
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 09:38:54 2026 +0200
+
+    Release 0.1.7 — transparent multi-format config (JSON/TOML/YAML), zero new deps
+    
+    ### Added
+    - Per-command config is now auto-detected as config.{json,toml,yaml,yml,conf,ini}
+      in the config dir. JSON stays serde-strict; TOML/YAML/INI share a small built-in
+      flat parser (src/config.rs). The schema is flat, so all three styles reduce to
+      the same shape. `[*]` aliases `[defaults]`; unknown keys / bad lines are skipped.
+      No new crates — the "zero dependencies" promise holds (Cargo.lock still 33).
+    
+    ### Tests / hygiene
+    - +5 tests (flat parser TOML/YAML/garbage/`[*]`, config.toml end-to-end pickup).
+    - Fixed a pre-existing flaky pair: the banner integration tests ran `seq` without
+      `--no-auto` or an isolated XDG_DATA_HOME, so shared metrics + auto-tuning could
+      shift head/tail under parallel load. Now isolated and deterministic.
+    
+    209 unit + 22 integration tests (stable across repeated runs); clippy clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md                |  11 +++
+ Cargo.lock                  |   2 +-
+ Cargo.toml                  |   2 +-
+ README.md                   |  38 +++++----
+ docs/guide/configuration.md |  49 ++++++++---
+ src/config.rs               | 198 ++++++++++++++++++++++++++++++++++++--------
+ tests/integration.rs        |  35 ++++++++
+ 7 files changed, 269 insertions(+), 66 deletions(-)
+
+commit de273e8c16e79ffbb4824044e2725b9ac93e73d8
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 09:21:18 2026 +0200
+
+    Release 0.1.6 — audit hardening pass (terminal-injection, concurrency, bounds)
+    
+    Full file-by-file / test-by-test audit (4 parallel review passes), fixes:
+    - telemetry: strip control chars from user-writable metrics cmd names in
+      --stats/--discover (no terminal injection); clamp efficiency to 100%; reject
+      inf/nan cost; truncate long names in --discover.
+    - recovery: PID-scoped temp file (no concurrent-run collision); remove partial
+      file on mid-stream I/O error.
+    - filter: byte-bound the diff-context buffer (was line-bound only); require the
+      space in @@-hunk-header detection (no @@@@ false-activate).
+    - scripts: robust help() (no internals leak); agent-rules no blank-line creep;
+      hook installers clean their jq scratch file on early-exit failure.
+    - tests: +6 covering the above and the previously-uncovered stats path,
+      DiffCollapse↔pipeline integration, and config precedence.
+    
+    205 unit + 21 integration tests; clippy clean; scripts shellcheck error-clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md         | 30 +++++++++++++++++++
+ Cargo.lock           |  2 +-
+ Cargo.toml           |  2 +-
+ agent-hook.sh        | 11 +++++--
+ agent-rules.sh       |  9 ++++--
+ claude-hook.sh       | 11 +++++--
+ src/filter.rs        | 56 +++++++++++++++++++++++++++++++----
+ src/recovery.rs      | 23 ++++++++++----
+ src/telemetry/mod.rs | 84 ++++++++++++++++++++++++++++++++++++++++------------
+ tests/integration.rs | 62 ++++++++++++++++++++++++++++++++++++++
+ 10 files changed, 249 insertions(+), 41 deletions(-)
+
+commit a1fa4947dea83ac96c402c3226a9db24f6734601
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 08:52:35 2026 +0200
+
+    Release 0.1.5 — format-aware diff compression, --discover/--json/USD, agent-rules.sh
+    
+    ### Added
+    - Format-aware diff compression: a streaming stage collapses long runs of unchanged
+      unified-diff context (keeps file/hunk headers and every +/- line). Activates only
+      after a real `@@ … @@` hunk header, so non-diff output is never touched. (src/filter.rs)
+    - Stats: `--discover` (keep/drop/footprint advisory), `--json` export, and
+      `--cost-per-mtok` USD estimate. Shared metrics aggregation refactor. (src/telemetry)
+    - agent-rules.sh: project rule installer for agents that can't rewrite a command
+      (Cursor, Cline, Copilot, Codex) — best-effort prompt-injection.
+    - README "How it compares" section (vs rtk / snip / Lean Ctx).
+    
+    CHANGELOG: restored the [0.1.4] heading (those features shipped in the v0.1.4 tag)
+    and added [0.1.5]. 201 unit + 19 integration tests; clippy clean; scripts shellcheck-clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md              |  20 ++++
+ Cargo.lock                |   2 +-
+ Cargo.toml                |   2 +-
+ README.md                 |  42 +++++++-
+ agent-rules.sh            | 141 +++++++++++++++++++++++++
+ docs/guide/claude-code.md |  14 ++-
+ docs/reference/index.md   |  13 +++
+ src/args.rs               |  16 ++-
+ src/filter.rs             | 188 ++++++++++++++++++++++++++++++++--
+ src/main.rs               |   8 +-
+ src/telemetry/mod.rs      | 255 ++++++++++++++++++++++++++++++++++++++++------
+ tests/integration.rs      |  50 +++++++++
+ 12 files changed, 702 insertions(+), 49 deletions(-)
+
+commit a0738f8e8fccada18dc1d4fcd782b9bed3baf433
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 08:22:27 2026 +0200
+
+    Release 0.1.4 — recovery on failure, per-command config, multi-agent hooks
+    
+    ### Added
+    - `--recover`: on a failing command whose output was truncated, save the full
+      output to a temp file and point the agent at it in the banner (read the omitted
+      middle without re-running). Lazy, bounded, fail-safe; off by default. (src/recovery.rs)
+    - Per-command config at ~/.config/l0-cache/config.json: optional overrides for
+      head/tail/tail_error/threshold/only_errors/recover with a defaults block.
+      Precedence: explicit CLI flag > config > built-in default. (src/config.rs)
+    - agent-hook.sh: generalized transparent-hook installer for the agents whose hook
+      API can rewrite a command — Claude Code (PreToolUse) and Gemini CLI (BeforeTool).
+      Cursor's hook can only allow/deny, so it can't be wrapped transparently.
+    
+    197 unit + 17 integration tests; clippy -D warnings clean; hooks shellcheck-clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md                |  20 ++++
+ Cargo.lock                  |   2 +-
+ Cargo.toml                  |   2 +-
+ README.md                   |  44 +++++++++
+ agent-hook.sh               | 204 +++++++++++++++++++++++++++++++++++++++
+ claude-hook.sh              |   3 +
+ docs/guide/claude-code.md   |  30 ++++++
+ docs/guide/configuration.md |  35 ++++++-
+ docs/reference/index.md     |   6 ++
+ src/args.rs                 |   6 ++
+ src/config.rs               | 160 +++++++++++++++++++++++++++++++
+ src/main.rs                 |  47 +++++++--
+ src/recovery.rs             | 229 ++++++++++++++++++++++++++++++++++++++++++++
+ src/runner.rs               |  99 ++++++++++++++++++-
+ 14 files changed, 874 insertions(+), 13 deletions(-)
+
+commit ce6039a2e45871820f34c5184bdc028f9b3ced1e
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 07:40:27 2026 +0200
+
+    docs: add --stats dashboard screenshot to README and docs hero
+    
+    Capture of the new colorized telemetry dashboard. Lives in docs/public/ so
+    VitePress serves it for the home hero; the README embeds the same file.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ README.md                  |   4 ++++
+ docs/index.md              |   3 +++
+ docs/public/screenshot.png | Bin 0 -> 100692 bytes
+ 3 files changed, 7 insertions(+)
+
+commit 0dacaadd30d32e5747dc5a04171966a3ffc752de
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 07:10:16 2026 +0200
+
+    Release 0.1.3 — color/UI overhaul
+    
+    - New src/ui.rs: NO_COLOR/TTY color guard (+ FORCE_COLOR/CLICOLOR_FORCE) and
+      visible-width box primitives so colored cells stay aligned in a fixed frame.
+    - --stats: dense boxed dashboard (summary card + per-command table with
+      efficiency bars and ↑ best / ⚠ low markers).
+    - --doctor: re-skinned to share the same boxed visual language (logic unchanged).
+    - benchmark.sh: boxed header + comparison table (lines/size/~tokens/reduction%).
+    - install.sh / claude-hook.sh: honor the NO_COLOR/TTY color guard.
+    - Bump to 0.1.3; README + docs aligned (dashboard preview, color/NO_COLOR notes).
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md                |  18 ++
+ Cargo.lock                  |   2 +-
+ Cargo.toml                  |   2 +-
+ README.md                   |  23 +++
+ benchmark.sh                | 135 +++++++++------
+ claude-hook.sh              |   7 +-
+ docs/guide/configuration.md |   5 +
+ docs/guide/quickstart.md    |  28 +--
+ docs/reference/index.md     |   3 +
+ install.sh                  |  21 ++-
+ src/main.rs                 |   1 +
+ src/telemetry/mod.rs        | 412 ++++++++++++++++++++++++++++----------------
+ src/ui.rs                   | 317 ++++++++++++++++++++++++++++++++++
+ tests/integration.rs        |   8 +-
+ 14 files changed, 764 insertions(+), 218 deletions(-)
+
+commit 5f7573d2f1e46e0188925b964766f1aad77b53f7
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 00:45:20 2026 +0200
+
+    docs: add CI, release, license, and MSRV badges to the README
+    
+    Add four status badges under the title: GitHub Actions CI, latest GitHub
+    release, MIT license, and Minimum Supported Rust Version. Coverage is
+    intentionally omitted — no coverage pipeline is configured, so a coverage
+    badge would be broken/misleading.
+    
+    Declare `rust-version = "1.85"` in Cargo.toml so the MSRV is enforced by
+    cargo (matching the existing CI MSRV job) and the MSRV badge is self-documenting.
+    
+    The license badge is static (the repo is MIT per Cargo.toml and the LICENSE
+    file) because shields' github/license endpoint currently renders "invalid"
+    even though the GitHub API detects MIT correctly.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ Cargo.toml | 1 +
+ README.md  | 5 +++++
+ 2 files changed, 6 insertions(+)
+
+commit 4548ed64b04209d36d5f49b5485dfd2c96821d19
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Fri Jun 5 00:37:59 2026 +0200
+
+    docs: expand and align the Claude Code hook integration docs
+    
+    Document claude-hook.sh (shipped in v0.1.2) consistently across README,
+    the VitePress guide, and the changelog:
+    
+    - README: a fuller "Claude Code Integration" section (conservative/fail-safe
+      rules, runtime toggle, session-load caveat) plus a note that l0-cache is a
+      filter, not a persistent cache.
+    - docs/guide/claude-code.md: new guide page with how-it-works, a
+      wrapped/passed-through table, and a "Verifying it works" section; wired
+      into the sidebar.
+    - Reconcile the now-inaccurate "no shell hooks" claims in the guide intro and
+      home page — the binary stays explicit/unintrusive, the hook is an optional,
+      off-by-default layer.
+    - CHANGELOG: add the omitted claude-hook.sh entry under [0.1.2].
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md               |  10 +++++
+ README.md                  |  70 +++++++++++++++++++-----------
+ docs/.vitepress/config.mts |   1 +
+ docs/guide/claude-code.md  | 105 +++++++++++++++++++++++++++++++++++++++++++++
+ docs/guide/index.md        |   5 ++-
+ docs/index.md              |   2 +-
+ 6 files changed, 167 insertions(+), 26 deletions(-)
+
+commit eb44604cc107d05505b1d91402b1177e6b28d747
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:58:00 2026 +0200
+
+    Release 0.1.2
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md | 2 +-
+ Cargo.lock   | 2 +-
+ Cargo.toml   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+commit b762420e80226567f3e46ed7ef9ffde3aadd5d0c
+Merge: 5db92d1 7af0177
+Author: fab <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:55:33 2026 +0200
+
+    Merge pull request #3 from fabriziosalmi/fix/bounded-line-reader
+    
+    Bound memory on giant newline-free lines + RSS stress test
+
+commit 7af0177bece7eb173d409c6d68eb7cb089e8b577
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:51:45 2026 +0200
+
+    Bound memory on giant newline-free lines (chunked reader) + RSS stress test
+    
+    read_line used BufRead::read_until, which buffers the WHOLE line before the 1 MB
+    cap can apply — a 200 MB minified bundle (one line, valid UTF-8, no nulls, so
+    binary detection doesn't fire) was held in full, and again as the stored head
+    line → OOM in cgroup-restricted containers.
+    
+    - New read_line_capped() reads via fill_buf/consume, keeps at most MAX_LINE_BYTES
+      and DRAINS the remainder of the line (still counted, so bytes_raw stays exact).
+      read_line_bytes appends a "line truncated at 1MB" marker (unless JSON truncation
+      already replaced the content). All transforms and existing behavior unchanged.
+    - Unit tests: a 5 MB newline-free line stays ~1 MB with the right raw_len and
+      marker; the cap on a giant line doesn't consume the following line.
+    - Integration (unix): an RSS stress test pushes ~100 MB as a single line and
+      asserts the proxy's peak resident memory stays under 120 MB (the broken
+      behavior tracked the input at ~200 MB).
+    
+    Tests: 181 unit + 17 integration green; clippy -D warnings and fmt clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md         |   9 +++
+ src/runner.rs        | 225 ++++++++++++++++++++++++++++++++++++---------------
+ tests/integration.rs |  69 ++++++++++++++++
+ 3 files changed, 237 insertions(+), 66 deletions(-)
+
+commit 5db92d1d03470106c40fbfbd77b3efbceff9427b
+Merge: 22619a8 c7cd599
+Author: fab <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:39:36 2026 +0200
+
+    Merge pull request #2 from fabriziosalmi/feat/claude-hook
+    
+    Add claude-hook.sh: optional transparent Claude Code integration
+
+commit c7cd599982d0197c47915dc551424be3edc7fe0a
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:35:44 2026 +0200
+
+    Add claude-hook.sh: optional transparent l0-cache integration for Claude Code
+    
+    A self-contained, portable helper to install/enable/disable a Claude Code
+    PreToolUse hook that routes simple Bash commands through `l0-cache`, so the model
+    gets token-saving filtering without prefixing anything by hand.
+    
+    - Conservative + fail-safe: only wraps simple single commands; passes through
+      pipes, &&/||, redirects, cd/export, command substitution, multi-line, and
+      interactive programs unchanged; any error runs the command as-is; does not
+      auto-approve (commands still go through normal permission rules).
+    - Off by default, toggled by a sentinel file (~/.config/l0-cache/hook.enabled) —
+      instant enable/disable with no restart.
+    - Idempotent install/uninstall edits settings.json via jq with a backup; honors
+      $CLAUDE_CONFIG_DIR / $XDG_CONFIG_HOME, so it works for any user.
+    
+    Subcommands: install | enable | disable | status | uninstall.
+    README gets a "Claude Code integration (optional)" section; CI shellchecks the
+    new script.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/ci.yml |   4 +-
+ README.md                |  24 +++++++
+ claude-hook.sh           | 170 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 197 insertions(+), 1 deletion(-)
+
+commit 22619a8b69e7a7deae82bf65140aae8b74ce8875
+Merge: abb5cb2 0517ff4
+Author: fab <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:06:25 2026 +0200
+
+    Merge pull request #1 from fabriziosalmi/polish/audit-waves
+    
+    Forensic audit polish (v0.1.1): fix no-op/blocker features, harden, document
+
+commit 0517ff43199327d89b9de8604c4500f513d1fdce
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 23:02:18 2026 +0200
+
+    CI: set MSRV to 1.85 (clap 4.6 requires the edition2024 feature)
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/ci.yml | 10 +++++-----
+ CONTRIBUTING.md          |  4 ++--
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+commit 2e924e0526c29d85373427af56c59ad3e11d15e7
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 22:57:29 2026 +0200
+
+    CI: set MSRV to 1.78 (Cargo.lock v4 needs cargo >= 1.78)
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/ci.yml | 8 +++++---
+ CONTRIBUTING.md          | 3 ++-
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+commit e8c5db928febf9b9e7b7693d280f562879f84d63
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 22:52:18 2026 +0200
+
+    Release prep: bump to 0.1.1 and finalize CHANGELOG
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md | 2 +-
+ Cargo.lock   | 2 +-
+ Cargo.toml   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+commit 33fbcafb251abfca1dabead5c43c6f6de9b378d2
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 22:50:49 2026 +0200
+
+    Wave C (C6): extract telemetry submodules (datetime, guard)
+    
+    Split the 2.3k-line telemetry god-module: move the two most self-contained
+    concerns into focused submodules, keeping behavior identical.
+    
+    - src/telemetry/datetime.rs — RFC 3339 format/parse + `--since` duration parsing.
+    - src/telemetry/guard.rs — the safety guard (dangerous-command detection, path
+      normalization, shell-payload scanning) and LLM-environment / guard_enabled logic.
+    
+    telemetry/mod.rs re-exports the guard's public API (check_dangerous_command,
+    guard_enabled) so `main` is unchanged, and the existing in-module test suite keeps
+    passing via `use super::*`. The remaining metrics/stats/doctor/adaptive code stays
+    in mod.rs (more coupled to ExecutionMetric/metrics_path); a finer split is a safe
+    follow-up. telemetry.rs 2368 lines -> mod.rs 1983 + datetime 173 + guard 235.
+    
+    Tests: 179 unit + 16 integration green; clippy -D warnings and fmt clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ src/telemetry/datetime.rs              | 173 ++++++++++++++
+ src/telemetry/guard.rs                 | 235 +++++++++++++++++++
+ src/{telemetry.rs => telemetry/mod.rs} | 414 ++-------------------------------
+ 3 files changed, 422 insertions(+), 400 deletions(-)
+
+commit bda6b4aa0f6d103d836a846a3d2a7cca7f299eed
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 22:42:41 2026 +0200
+
+    Wave C: performance, behavior tests, CI matrix, and quality cleanup
+    
+    Performance:
+    - get_adaptive_params reads only the last 256 KB of the metrics file (it needs a
+      few recent entries, not the whole up-to-10 MB log) on every wrapped command.
+    - feed() matches keywords with an allocation-free ASCII case-insensitive search
+      instead of line.to_lowercase() per line.
+    
+    Tests (lock in the Wave A/B fixes so they cannot silently regress):
+    - tail-error shows the larger tail on failure (on stdout, not just stderr);
+      --raw keeps all lines and big JSON verbatim; binary output carries the explicit
+      banner; --idle-timeout kills a hung pipeline promptly; SIGTERM is forwarded and
+      propagated as 143; concurrent metric writers don't corrupt the JSONL; --stats
+      renders from seeded metrics. 16 integration tests (was 9).
+    
+    CI:
+    - test job runs on a {ubuntu, macos} matrix and also does a release build (so the
+      opt-level=z/lto/strip profile is exercised) + a smoke run; new MSRV (1.74) and
+      static-musl jobs.
+    
+    Quality:
+    - banner cleanup: drop the duplicated "N lines omitted" footer (the mid-output
+      marker already states it); render the collapse banner from the meaningful
+      timestamp-skipped prefix instead of the leading timestamp token.
+    - map run_captured/run_passthrough I/O errors to 127 (not-found) vs 126 (other),
+      instead of a blanket 127.
+    - replace 3 #[allow(dead_code)] test-only wrappers with #[cfg(test)]; delete the
+      dead TOKEN_DIVISOR; hide the deprecated no-op --auto; drop the duplicated
+      trailing_var_arg attribute; add Default impls; guard run_passthrough on empty argv.
+    
+    Tests: 179 unit + 16 integration green; clippy -D warnings and fmt clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/ci.yml |  50 ++++++++++-
+ CONTRIBUTING.md          |   2 +-
+ src/args.rs              |   9 +-
+ src/filter.rs            |  85 +++++++++++++-----
+ src/main.rs              |  32 +++----
+ src/runner.rs            |   6 ++
+ src/telemetry.rs         |  74 ++++++++++++---
+ tests/integration.rs     | 230 +++++++++++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 433 insertions(+), 55 deletions(-)
+
+commit b0d77697ef0b9287b84ce47a6dae4f8b59cf6055
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 22:22:26 2026 +0200
+
+    Wave B: robustness, security/privacy hardening, and doc alignment
+    
+    Robustness:
+    - Run the captured child in its own process group; forward SIGINT/SIGTERM to that
+      group (a directed kill/timeout/docker-stop now terminates the child instead of
+      being swallowed by SIG_IGN while child.wait() blocks). The --idle-timeout
+      watchdog kills the whole group via killpg(libc) instead of `kill -9 <sh pid>`,
+      so pipelines/grandchildren can't keep the pipe open and deadlock.
+    - print_stats fail-closed on unparseable --since timestamps; parse_since uses
+      saturating_mul; doctor treats 0400/0440 (no group/world access) as secure.
+    
+    Security / privacy:
+    - Redact credentials from the metrics `args` field: --password/--token/--secret/
+      --api-key values, -H/--header values, and URL userinfo become ***.
+    - Metrics files are created 0600 via the open mode (no world-readable window).
+    - Installer pins to the latest release tag and warns before an unattended
+      pipe install; global install verifies the dir is on $PATH.
+    
+    Correctness:
+    - Auto-tune "panic/traceback" heuristic now rebalances already-buffered head
+      lines into the tail (retroactive), instead of only affecting future pushes.
+    
+    Docs:
+    - Document the previously-undocumented flags and the Safety Guard (env var, exit
+      126, auto-enable, best-effort scope) in README + reference; fix drift (ts is
+      second-resolution, signals are forwarded not ignored, binary banner, --raw is
+      verbatim, test count, stats dashboard example); add CHANGELOG [Unreleased];
+      SECURITY.md Data Handling + guard scope + installer notes.
+    
+    Tests: 177 unit + 9 integration green; clippy -D warnings and fmt clean.
+    Verified end-to-end: SIGTERM→143 + child killed, watchdog kills pipeline group,
+    secret redaction, L0_CACHE_GUARD=true consistent across enforcement and doctor.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ CHANGELOG.md                      | 35 +++++++++++++++
+ README.md                         | 45 +++++++++++++++++---
+ SECURITY.md                       | 27 ++++++++++++
+ docs/guide/quickstart.md          | 29 ++++++-------
+ docs/internals/filter-pipeline.md | 22 +++++++---
+ docs/reference/exit-codes.md      | 20 +++++----
+ docs/reference/index.md           | 51 ++++++++++++++++++++--
+ docs/reference/metrics.md         |  4 +-
+ install.sh                        | 28 ++++++++++--
+ src/args.rs                       | 90 ++++++++++++++++++++++++++++++++++++++-
+ src/filter.rs                     | 82 ++++++++++++++++++++++++++++-------
+ src/main.rs                       | 30 ++++++++++---
+ src/runner.rs                     | 50 ++++++++++++++++++----
+ src/telemetry.rs                  | 60 ++++++++++++++++----------
+ 14 files changed, 476 insertions(+), 97 deletions(-)
+
+commit fe0485e5fdf3c20c931b5d3c41d0c28eb2a61a0b
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 21:56:25 2026 +0200
+
+    Wave A: fix advertised features that were no-ops + blockers
+    
+    Correctness & security blockers surfaced by the forensic audit:
+    
+    - installer: `curl | bash` was a silent no-op — the empty-array expansion
+      "${ARGS[@]:-}" injected an empty-string arg that hit the unknown-arg case
+      and printed help instead of installing. Use "${ARGS[@]+...}" (zero words
+      when empty) + a CI regression job (shellcheck, empty-expansion assert,
+      dry-run smoke).
+    - guard: was bypassed for `sh -c "rm -rf /etc"` (the dominant LLM-agent
+      pattern) because the scan only saw the opaque outer argv. Now re-scans each
+      segment of the shell `-c` payload. Also normalize rm paths so `/etc/`,
+      `/etc//`, `/etc/.`, `/etc/*`, `/*` are caught (trailing-slash bypass).
+    - --tail-error / failure backoff was inert: expand_tail ran after the stream
+      had already evicted lines. Removed expand_tail; the buffer now retains
+      max(tail, tail_error) (and enough for the threshold, capped) and trims to
+      the right window at render based on exit code. Also fixes a latent silent
+      gap below threshold when the tail wrapped.
+    - --raw is now truly raw: progress-bar/backspace squashing and the >2000B
+      JSON truncation are filtered-mode only; raw keeps content verbatim.
+    - bytes_raw is measured from the true pre-transform byte count, so token
+      savings are no longer understated.
+    - binary output: instead of silently emitting only the first ~8KB with
+      truncated=false, emit an explicit "binary output detected — showing first
+      N of M bytes" banner and set truncated + correct bytes_final.
+    - metrics rotation: rewrite the pruned history into the ACTIVE file (was
+      written to the never-read .jsonl.old, so stats/adaptive saw ~0 history
+      after every rotation) + size-cap so an all-recent oversized file does not
+      re-rotate on every run.
+    - print_stats: char-boundary-safe command-name slice (was &cmd[..22], a
+      panic on a multibyte name from an externally-writable metrics file).
+    - guard enable/disable: single guard_enabled() with explicit truthy/falsy
+      parsing, so enforcement and --doctor can no longer disagree (L0_CACHE_GUARD
+      =true previously disabled enforcement while doctor reported it active).
+    
+    Tests: 174 unit + 9 integration green; clippy -D warnings and fmt clean.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+ .github/workflows/ci.yml |  22 ++++
+ install.sh               |   8 +-
+ src/filter.rs            | 212 +++++++++++++++++-------------------
+ src/main.rs              |  10 +-
+ src/runner.rs            | 277 +++++++++++++++++++++++++++++++----------------
+ src/telemetry.rs         | 272 ++++++++++++++++++++++++++++++++++++++++------
+ 6 files changed, 550 insertions(+), 251 deletions(-)
+
+commit abb5cb2528838a06d57134af003db458bf7a8b78
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Thu Jun 4 21:03:13 2026 +0200
+
+    Initial release v0.1.0
+
+ .github/workflows/ci.yml          |   58 +
+ .github/workflows/deploy-docs.yml |   66 +
+ .gitignore                        |    9 +
+ CHANGELOG.md                      |   25 +
+ CONTRIBUTING.md                   |   80 ++
+ Cargo.lock                        |  285 +++++
+ Cargo.toml                        |   28 +
+ LICENSE                           |   21 +
+ Makefile                          |   77 ++
+ README.md                         |  268 ++++
+ SECURITY.md                       |   21 +
+ benchmark.sh                      |   56 +
+ build.rs                          |   30 +
+ docs/.vitepress/config.mts        |   45 +
+ docs/guide/configuration.md       |   69 +
+ docs/guide/index.md               |   50 +
+ docs/guide/installation.md        |   82 ++
+ docs/guide/quickstart.md          |   96 ++
+ docs/index.md                     |   25 +
+ docs/internals/architecture.md    |   75 ++
+ docs/internals/cross-platform.md  |   71 ++
+ docs/internals/filter-pipeline.md |  127 ++
+ docs/internals/hardening.md       |   43 +
+ docs/reference/exit-codes.md      |   47 +
+ docs/reference/index.md           |   78 ++
+ docs/reference/metrics.md         |   70 +
+ install.sh                        |  567 +++++++++
+ package-lock.json                 | 2549 +++++++++++++++++++++++++++++++++++++
+ package.json                      |   11 +
+ src/args.rs                       |  407 ++++++
+ src/filter.rs                     | 1207 ++++++++++++++++++
+ src/main.rs                       |  255 ++++
+ src/runner.rs                     |  794 ++++++++++++
+ src/telemetry.rs                  | 2100 ++++++++++++++++++++++++++++++
+ tests/integration.rs              |  289 +++++
+ 35 files changed, 10081 insertions(+)

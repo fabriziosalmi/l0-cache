@@ -55,8 +55,14 @@ const RAW_MODE_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// so a pathological `--threshold` cannot make the filtered buffer unbounded.
 const RETAIN_COMPLETENESS_CAP: usize = 100_000;
 
+/// The merged child output stream. Unix: the single pipe from
+/// `sh -c '<command> 2>&1'`. Windows: a channel-backed reader fed by two
+/// drain threads (stdout + stderr).
+type MergedReader = BufReader<Box<dyn Read + Send>>;
+
 /// Spawn a command via shell with explicit `2>&1` merge.
-fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::process::ChildStdout>)> {
+#[cfg(unix)]
+fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, MergedReader)> {
     // Build a shell command string with proper escaping
     let shell_cmd = cmd
         .iter()
@@ -74,7 +80,6 @@ fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::proces
     // Put the child in its own process group so the parent can deliver SIGINT/
     // SIGTERM (and the watchdog SIGKILL) to the WHOLE subtree via killpg, rather
     // than only the `sh` wrapper. pgid becomes the child pid.
-    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
@@ -94,11 +99,103 @@ fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, BufReader<std::proces
     };
 
     let stdout = child.stdout.take().expect("stdout was piped");
-    let reader = BufReader::with_capacity(64 * 1024, stdout);
+    let reader: MergedReader =
+        BufReader::with_capacity(64 * 1024, Box::new(stdout) as Box<dyn Read + Send>);
+    Ok((child, reader))
+}
+
+/// Windows: spawn the program directly (no shell) and merge stdout + stderr
+/// with two drain threads feeding one channel.
+///
+/// There is no `sh -c '... 2>&1'` here, so the merge is per-read-chunk rather
+/// than kernel-exact: interleaving between stdout and stderr is best-effort
+/// (each stream's own ordering is always preserved). Shell payloads still
+/// work explicitly — `l0-compressor cmd /C "a | b"` — but no shell is
+/// involved for a plain program invocation, which also sidesteps cmd.exe
+/// quoting entirely (arguments are passed as-is via CreateProcess).
+#[cfg(not(unix))]
+fn spawn_merged(cmd: &[String]) -> std::io::Result<(Child, MergedReader)> {
+    use std::sync::mpsc;
+
+    let mut command = Command::new(&cmd[0]);
+    command
+        .args(&cmd[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "l0-compressor: '{}' not found in PATH. Note: on Windows the command is spawned directly (no shell); for shell syntax use `l0-compressor cmd /C \"...\"`.",
+                    cmd[0]
+                ),
+            ));
+        }
+        Err(e) => return Err(e),
+    };
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+    fn drain<R: Read + Send + 'static>(mut src: R, tx: mpsc::Sender<Vec<u8>>) {
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) | Err(_) => break, // EOF or broken pipe: sender drops
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break; // receiver gone (parent exiting)
+                        }
+                    }
+                }
+            }
+        });
+    }
+    drain(child.stdout.take().expect("stdout was piped"), tx.clone());
+    drain(child.stderr.take().expect("stderr was piped"), tx);
+
+    /// Blocking reader over the channel; returns EOF once both drain threads
+    /// have exited (all senders dropped).
+    struct ChannelReader {
+        rx: mpsc::Receiver<Vec<u8>>,
+        pending: Vec<u8>,
+        pos: usize,
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.pending.len() {
+                match self.rx.recv() {
+                    Ok(chunk) => {
+                        self.pending = chunk;
+                        self.pos = 0;
+                    }
+                    Err(_) => return Ok(0), // both streams closed
+                }
+            }
+            let n = (self.pending.len() - self.pos).min(out.len());
+            out[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    let merged = ChannelReader {
+        rx,
+        pending: Vec::new(),
+        pos: 0,
+    };
+    let reader: MergedReader =
+        BufReader::with_capacity(64 * 1024, Box::new(merged) as Box<dyn Read + Send>);
     Ok((child, reader))
 }
 
 /// Simple shell escaping: wrap in single quotes, escape existing single quotes.
+/// Only the unix spawn path builds a shell string; Windows spawns directly.
+#[cfg(any(unix, test))]
 fn shell_escape(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -841,6 +938,7 @@ mod tests {
 
     // ── exit_code_from_status tests ────────────────────────────────────
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn exit_code_normal() {
         let status = Command::new("sh")
@@ -851,6 +949,7 @@ mod tests {
         assert_eq!(exit_code_from_status(status), 42);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn exit_code_zero() {
         let status = Command::new("true").status().unwrap();
@@ -871,6 +970,7 @@ mod tests {
 
     // ── run_captured tests ─────────────────────────────────────────────
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_echo_captured() {
         let result = run_captured(
@@ -891,6 +991,7 @@ mod tests {
         assert_eq!(result.strategy, "head_tail");
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_false_returns_nonzero() {
         let result = run_captured(
@@ -909,12 +1010,14 @@ mod tests {
         assert_ne!(result.exit_code, 0);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_passthrough_echo() {
         let code = run_passthrough(&["echo".into(), "pass".into()]).unwrap();
         assert_eq!(code, 0);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_multiline() {
         let result = run_captured(
@@ -939,6 +1042,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_stderr_merged() {
         let result = run_captured(
@@ -959,6 +1063,7 @@ mod tests {
         assert!(output.contains("out"), "stdout should be present: {output}");
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_exit_code_propagation() {
         let result = run_captured(
@@ -977,6 +1082,7 @@ mod tests {
         assert_eq!(result.exit_code, 42);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_raw_mode() {
         let result = run_captured(
@@ -1000,6 +1106,7 @@ mod tests {
         assert!(result.filter_result.output.contains("raw test"));
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_large_output_truncation() {
         let result = run_captured(
@@ -1020,6 +1127,7 @@ mod tests {
         assert_eq!(result.strategy, "head_tail");
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_small_output_no_truncation() {
         let result = run_captured(
@@ -1038,6 +1146,7 @@ mod tests {
         assert!(!result.filter_result.truncated);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_empty_output() {
         let result = run_captured(
@@ -1057,6 +1166,7 @@ mod tests {
         assert!(result.filter_result.output.trim().is_empty());
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_duration_is_positive() {
         let result = run_captured(
@@ -1075,18 +1185,21 @@ mod tests {
         assert!(result.duration_ms < 10_000, "echo should complete quickly");
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_passthrough_false() {
         let code = run_passthrough(&["false".into()]).unwrap();
         assert_ne!(code, 0);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_passthrough_nonexistent() {
         let result = run_passthrough(&["__nonexistent_cmd_xyz__".into()]);
         assert!(result.is_err());
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn run_captured_nonexistent_command() {
         let result = run_captured(
@@ -1109,6 +1222,7 @@ mod tests {
     // Distinct argv[0] per test → distinct temp filenames, so parallel runs
     // don't race on a shared recovery file.
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn recover_keeps_full_output_on_failure() {
         let result = run_captured(
@@ -1135,6 +1249,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn recover_absent_on_success() {
         // `seq` → label "seq", a distinct temp file from the failure test.
@@ -1159,6 +1274,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn recover_absent_when_not_truncated() {
         // `false` → fails with no output → nothing was truncated → nothing to recover.
@@ -1183,6 +1299,7 @@ mod tests {
     // Distinct argv[0] per test → distinct recovery temp filenames (unused
     // here since recover=false, but keeps the pattern consistent).
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn squelch_trims_clean_success_tail() {
         let args = ["seq".to_string(), "1".into(), "500".into()];
@@ -1207,6 +1324,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn squelch_backs_off_on_error_signal() {
         // exit 0, but a warning is printed → the squelch must NOT trim.
@@ -1228,6 +1346,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // spawns POSIX helpers (sh/echo/false/…)
     #[test]
     fn squelch_never_touches_failures() {
         // Failing command: output is identical with squelch on vs off — failures

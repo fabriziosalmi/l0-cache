@@ -13,6 +13,30 @@
 | Proxmox VE host | `x86_64-unknown-linux-gnu` | `/bin/sh` (dash) | set | Tested |
 | systemd service | matches host | varies | often missing | `/etc/passwd` fallback |
 | cron job | matches host | varies | often missing | `/etc/passwd` fallback |
+| Windows 10/11 | `x86_64-pc-windows-msvc` | none (direct spawn) | `%LOCALAPPDATA%` | Experimental (CI smoke-tested) |
+
+## Windows (experimental)
+
+On Windows the command is spawned directly via `CreateProcess` — no shell.
+stdout and stderr are merged by two drain threads feeding one channel, so
+interleaving between the two streams is best-effort (per read chunk) rather
+than the kernel-exact ordering `sh -c '… 2>&1'` provides on unix; each
+stream's own ordering is always preserved. Consequences:
+
+- Shell syntax needs an explicit shell: `l0-compressor cmd /C "a | b"`.
+- Ctrl-C follows default console semantics (delivered to the process group);
+  there is no signal forwarding. The `--idle-timeout` watchdog kills the
+  child tree with `taskkill /F /T`.
+- The data directory resolves to `%XDG_DATA_HOME%`, then `%LOCALAPPDATA%`,
+  then `%USERPROFILE%\.local\share`.
+- The 0600/0700 permission hardening and the `--recover` symlink defenses
+  are unix-only; Windows temp and profile directories are per-user.
+- The safety guard's `rm -rf` matcher already understands `C:\Users` /
+  `/c/Users` spellings.
+
+Coverage: the unit suite runs on Windows in CI (the E2E suite is unix-gated),
+plus a CI smoke test for native spawn, truncation, stderr merge, and
+exit-code propagation.
 
 ## Build Targets
 

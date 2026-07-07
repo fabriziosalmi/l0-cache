@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Native Windows support (experimental).** The command is spawned directly
+  via `CreateProcess` (no shell); stdout/stderr are merged by two drain
+  threads feeding one channel (best-effort interleaving vs the kernel-exact
+  `sh -c '… 2>&1'` merge on unix). Data dir resolves via `%LOCALAPPDATA%` /
+  `%USERPROFILE%`. New CI job builds, unit-tests, and smoke-tests the native
+  path (spawn, truncation, stderr merge, exit-code propagation); the release
+  workflow now ships `l0-compressor-x86_64-pc-windows-msvc.zip`. E2E suite
+  and process-spawning unit tests are unix-gated.
+- **Tokenizer-measured benchmark.** `cargo run --release --example
+  token_benchmark` replays captured real command outputs
+  (`benchmarks/fixtures/`) through the binary and measures savings with
+  tiktoken `o200k_base` / `cl100k_base`: 88–97% per output, 96.6% weighted
+  (see `benchmarks/RESULTS.md`). tiktoken-rs is a dev-dependency only.
+
+### Changed
+- Docs toolchain upgraded to VitePress 2 (vite 8), clearing the Dependabot
+  alerts on the docs dev server (GHSA-4w7w-66w2-5vf9 and related); stale
+  esbuild override removed.
+
 ## [0.2.0] - 2026-07-07
 
 ### Changed — project renamed `l0-cache` → `l0-compressor`

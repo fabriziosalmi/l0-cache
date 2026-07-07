@@ -55,6 +55,36 @@ jobs:
       - name: Smoke-run the release binary
         run: ./target/release/l0-compressor --no-auto echo "ci-smoke" | grep -q ci-smoke
 
+  windows:
+    name: Windows Build & Native Smoke
+    runs-on: windows-latest
+    needs: quality
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests (unit; E2E suite is unix-gated)
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Smoke — native spawn, filtering, stderr merge, exit codes
+        shell: cmd
+        run: |
+          target\release\l0-compressor.exe --no-auto cargo --version | findstr /C:"cargo" || exit /b 1
+          target\release\l0-compressor.exe --no-auto --threshold 10 --head 5 --tail 5 cargo tree | findstr /C:"omitted for LLM" || exit /b 1
+          target\release\l0-compressor.exe --no-auto cmd /C "echo tostderr 1>&2" | findstr /C:"tostderr" || exit /b 1
+          target\release\l0-compressor.exe --no-auto cmd /C "exit 7"
+          if %errorlevel% neq 7 exit /b 1
+          target\release\l0-compressor.exe --stats
+
   msrv:
     name: Minimum Supported Rust (1.85)
     runs-on: ubuntu-latest

@@ -1,3 +1,8 @@
+// The E2E suite drives the binary through `sh -c` mock scripts and POSIX
+// helpers throughout; on Windows the unit-test suite plus the CI smoke run
+// cover the native path.
+#![cfg(unix)]
+
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus};
 use std::thread;

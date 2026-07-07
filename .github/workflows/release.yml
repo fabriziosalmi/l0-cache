@@ -29,6 +29,7 @@ jobs:
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +45,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package + checksum
+      - name: Package + checksum (unix)
+        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/l0-compressor"
@@ -56,9 +58,21 @@ jobs:
             shasum -a 256 "$art" > "$art.sha256"
           fi
 
+      - name: Package + checksum (windows zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/l0-compressor.exe"
+          $art = "l0-compressor-${{ matrix.target }}.zip"
+          Compress-Archive -Path $bin -DestinationPath $art
+          $hash = (Get-FileHash -Algorithm SHA256 $art).Hash.ToLower()
+          "$hash  $art" | Out-File -Encoding ascii "$art.sha256"
+
       - name: Upload to the release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             l0-compressor-${{ matrix.target }}.tar.gz
             l0-compressor-${{ matrix.target }}.tar.gz.sha256
+            l0-compressor-${{ matrix.target }}.zip
+            l0-compressor-${{ matrix.target }}.zip.sha256

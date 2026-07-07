@@ -201,6 +201,8 @@ pub fn run_doctor() {
         );
         if metrics_file.exists() {
             if let Ok(meta) = fs::metadata(&metrics_file) {
+                #[cfg(not(unix))]
+                let _ = &meta;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;

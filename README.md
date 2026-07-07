@@ -8,9 +8,11 @@
 A CLI proxy written in Rust that reduces LLM token consumption by filtering,
 truncating, and compressing command output. Prefix any command with
 `l0-compressor` (or enable the transparent Claude Code / Gemini CLI hook) and
-the output an AI coding agent reads is reduced by an estimated 50–80%, while
-exit codes, error tails, and output ordering are preserved. Runs on macOS and
-Linux.
+the output an AI coding agent reads shrinks by 50–80% on typical mixed
+sessions (telemetry estimate) and 88–97% on noisy outputs (tokenizer-measured
+— see [Benchmarks](#benchmarks)), while exit codes, error tails, and output
+ordering are preserved. Runs on macOS and Linux; native Windows support is
+experimental (on master, unreleased).
 
 Documentation: [fabriziosalmi.github.io/l0-compressor](https://fabriziosalmi.github.io/l0-compressor/)
 
@@ -32,7 +34,7 @@ directly comparable.
 
 | Tool | ★ | Lang | License | Mechanism | Coverage | Unknown commands | Claimed savings |
 |---|---|---|---|---|---|---|---|
-| **l0-compressor** | — | Rust | MIT | generic streaming filters (head/tail, collapse, diff/JSON-aware) | any command | ✅ same behavior | 50–80% (estimated, bytes÷4) |
+| **l0-compressor** | — | Rust | MIT | generic streaming filters (head/tail, collapse, diff/JSON-aware) | any command | ✅ same behavior | 88–97% on noisy outputs (o200k-measured, [reproducible](benchmarks/RESULTS.md)); 50–80% session-wide (estimate) |
 | [rtk](https://github.com/rtk-ai/rtk) | ~69k | Rust | Apache-2.0 | per-command parsers, 4 strategies | 100+ commands | partial (passthrough) | 60–90% |
 | [snip](https://github.com/edouard-claude/snip) | ~360 | Go | MIT | declarative YAML filters, 19 pipeline actions | 127 filters | partial | 60–90% |
 | [lean-ctx](https://github.com/yvgude/lean-ctx) | ~3.1k | Rust | Apache-2.0 | shell hook + MCP server (81 tools) + wire proxy | 95+ patterns + file reads | partial | 60–90% |
@@ -48,7 +50,7 @@ directly comparable.
 
 | Tool | Adaptive tuning | Blocks destructive cmds | Secret redaction | Full-output recovery | Local stats | Agent integrations | Native Windows |
 |---|---|---|---|---|---|---|---|
-| **l0-compressor** | ✅ 6 rules, persisted per `(cmd, args)` | ✅ guard, 161-case adversarial suite | ✅ telemetry args | ✅ `--recover` temp file | dashboard / JSON / `--discover` / `--doctor` | Claude Code + Gemini CLI hooks; rules files for Cursor/Cline/Copilot/Codex | ❌ |
+| **l0-compressor** | ✅ 6 rules, persisted per `(cmd, args)` | ✅ guard, 161-case adversarial suite | ✅ telemetry args | ✅ `--recover` temp file | dashboard / JSON / `--discover` / `--doctor` | Claude Code + Gemini CLI hooks; rules files for Cursor/Cline/Copilot/Codex | experimental¹ |
 | rtk | ❌ (static `discover`) | ❌ (exclusion lists) | partial (AWS) | ✅ tee on failure | ✅ + opt-in remote telemetry | 10+ agents | ✅ |
 | snip | ❌ | ❌ | ❌ | ❌ | ✅ SQLite | 2 hooks + prompt injection for others | ❌ |
 | lean-ctx | ✅ per-file read modes | guard layer | ✅ | ✅ 5 retrieval paths | ✅ signed ledger | 30+ agents | ✅ |
@@ -58,6 +60,7 @@ directly comparable.
 | chop | ❌ | ❌ | ❌ | ❌ | ✅ `chop gain` | 4 agents | ✅ |
 | omni | memory only | ❌ | ❌ | ✅ hash → store | ✅ | 6 agents | ✅ |
 
+¹ Native Windows spawn path is on master (built and smoke-tested in CI), not yet in a release. See [Windows support](#windows-support-experimental).
 ² squeez routes risky commands around compression; it does not refuse to run them.
 
 ### Adjacent layers (different mechanism, same goal)
@@ -81,11 +84,12 @@ memory/codebase-index MCP servers solve a different problem and are omitted.
 - Per-command parsers (rtk, snip, chop) produce higher ratios and better
   semantic output on the commands they cover — e.g. grouped test failures.
   Generic filters do not match that on known commands.
-- No native Windows build.
+- Windows support is experimental and unreleased; the others in the ✅ column
+  ship Windows binaries today.
 - No cross-call deduplication, file-read compression, MCP server, or session
   memory (squeez, sqz, lean-ctx, omni have one or more of these).
-- The savings figure is an estimate (bytes ÷ 4), not tokenizer-measured;
-  squeez and sqz publish tokenizer-based benchmarks.
+- The built-in `--stats` telemetry estimates tokens as bytes ÷ 4; only the
+  offline [benchmark](benchmarks/RESULTS.md) is tokenizer-measured.
 - The smallest install base in the table.
 
 ### Where l0-compressor differentiates
@@ -133,6 +137,29 @@ confirm success. The head (command echo) is always kept, the summary line
 always survives, and the moment any `error`/`warn`/`fail`/`panic`/… signal
 appears — or the command exits non-zero — the full tail is restored. Disable
 with `--no-squelch` or `squelch = false` in config.
+
+## Benchmarks
+
+Savings measured with real tokenizers (tiktoken `o200k_base` / `cl100k_base`)
+on captured real command outputs, replayed through the release binary at
+default settings — not the bytes÷4 estimate the built-in telemetry uses:
+
+| Output | Lines | o200k tokens | saved |
+|---|---|---|---|
+| `cargo test` (354 tests) | 373 → 22 | 5360 → 189 | 96.5% |
+| `cargo build --release` (clean, 33 crates) | 30 → 2 | 387 → 27 | 93.0% |
+| `git log --stat -120` | 1390 → 66 | 18439 → 807 | 95.6% |
+| `git show` (code diff) | 429 → 42 | 5203 → 445 | 91.4% |
+| `npm ls --all` | 222 → 42 | 4388 → 536 | 87.8% |
+| service log dump, 5100 lines, exit 1 | 5100 → 156 | 161759 → 4716 | 97.1% |
+| **Total (weighted)** | | 195536 → 6720 | **96.6%** |
+
+These numbers describe noisy outputs (the corpus is committed for
+reproducibility); short outputs below the truncation threshold pass through
+and session-wide savings depend on your command mix — the telemetry reports
+50–80% on typical sessions. Reproduce with
+`cargo run --release --example token_benchmark`; details in
+[benchmarks/RESULTS.md](benchmarks/RESULTS.md).
 
 ## Installation
 
@@ -572,6 +599,29 @@ for an invocation (useful for test harnesses and benchmarks).
 | cron / systemd | same as host | `/etc/passwd` fallback |
 | SSH with PTY | same as host | Signals work normally |
 | SSH without PTY | same as host | See known limitations |
+| Windows 10/11 | `x86_64-pc-windows-msvc` | Experimental (CI-built and smoke-tested) |
+
+### Windows support (experimental)
+
+The binary builds and runs natively on Windows (`x86_64-pc-windows-msvc`,
+built and smoke-tested in CI; release zip ships from the next tag). The
+mechanics differ from unix in ways that matter:
+
+- **No shell involved.** The command is spawned directly via `CreateProcess`;
+  stdout and stderr are merged by two drain threads. Interleaving between the
+  two streams is best-effort (per read chunk) rather than the kernel-exact
+  order `sh -c '… 2>&1'` gives on unix. For shell syntax, invoke it
+  explicitly: `l0-compressor cmd /C "a | b"`.
+- **Ctrl-C** is delivered by the console to the whole process group (default
+  console semantics); there is no signal forwarding. The `--idle-timeout`
+  watchdog uses `taskkill /T`.
+- **Data dir** resolves to `%XDG_DATA_HOME%`, then `%LOCALAPPDATA%`, then
+  `%USERPROFILE%\.local\share`. The 0600/0700 permission hardening and the
+  `--recover` symlink defenses are unix-only (Windows temp and profile dirs
+  are per-user by default).
+- The E2E test suite is unix-gated; Windows coverage is the unit suite plus
+  a CI smoke test (native spawn, truncation, stderr merge, exit-code
+  propagation).
 
 ### Cross-Compilation from macOS
 

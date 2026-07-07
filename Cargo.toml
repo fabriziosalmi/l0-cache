@@ -24,6 +24,12 @@ strip-ansi-escapes = "0.2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+# Used only by `examples/token_benchmark.rs` (tokenizer-measured savings).
+# Not compiled into the release binary; the MSRV job runs `cargo check`,
+# which does not build dev-dependencies.
+tiktoken-rs = "0.9"
+
 [profile.release]
 opt-level = "z"     # optimize for size
 lto = true

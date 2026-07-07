@@ -1,0 +1,429 @@
+commit dfa355d21e787487a47fdbf6323c72cab8f4fda0
+Author: Fabrizio Salmi <fabrizio.salmi@gmail.com>
+Date:   Wed Jul 1 17:40:04 2026 +0200
+
+    harden: fix multibyte-output crash + recovery /tmp symlink attack; trim hot-path
+    
+    Three parallel audits (security/performance/robustness), findings verified
+    against the code before fixing.
+    
+    CRITICAL crash: skip_timestamp sliced arbitrary child output at fixed byte
+    offsets (&s[0..3], &s[15..]); a multibyte char (€/emoji/CJK) straddling offset
+    3 or 15 panicked, aborting the wrapper and swallowing the child's exit code
+    (verified: exit 7 → 101). Now char-boundary-safe via get(..). This violated the
+    project's core "never break the wrapped command" invariant.
+    
+    SECURITY: the --recover temp file at a predictable $TMPDIR/l0-cache/recovery-
+    <cmd>-<pid>.log used File::create (symlink-following, default perms) in a shared
+    /tmp — local symlink clobber + world-readable secrets. Now dir 0700 (rejected if
+    symlink/other-owned), file 0600 + O_NOFOLLOW (Unix; Windows temp is per-user).
+    
+    PERF (per-line hot path): compute has_error_signal once/line instead of up to
+    14x + per-line auto-tune phrase scans; non-allocating fuzzy-signature compare
+    (was 2 Strings/line); binary detection validates only the new line (was O(n^2)
+    re-validation of the growing 8KB prefix).
+    
+    Adds regression tests: multibyte-boundary safety, fuzzy-signature semantics,
+    recovery file 0600/dir 0700, and symlink-refusal (O_NOFOLLOW). Audited-and-clean:
+    shell_escape, secret redaction, ANSI sanitization, unsafe libc, memory bounds.
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 81822a9..9d08e9c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
+ 
+ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
++## [Unreleased]
++
++Hardening / security / performance pass (three parallel audits, findings
++verified against the code before fixing).
++
++### Fixed
++- **Crash on multibyte output (core-invariant violation).** `skip_timestamp`
++  sliced arbitrary child output at fixed byte offsets (`&s[0..3]`, `&s[15..]`);
++  a `€`/emoji/CJK char straddling offset 3 or 15 panicked, **aborting the
++  wrapper and swallowing the child's real exit code** (verified: `exit 7`
++  surfaced as `101`). Now char-boundary-safe via `get(..)`, so ordinary
++  accented/emoji log lines can never crash the wrapper. Regression test added.
++- **Recovery temp file hardened against a shared-`/tmp` symlink attack.** The
++  `--recover` file lived at a predictable `$TMPDIR/l0-cache/recovery-<cmd>-<pid>.log`
++  created with `File::create` (follows symlinks, default perms) — on a multi-user
++  host an attacker could pre-plant a symlink to clobber a victim's file, and the
++  un-redacted output (possibly secrets) was world-readable. Now the dir is a
++  private `0700` (rejected if it's a symlink or another user's), and the file is
++  opened `0600` with `O_NOFOLLOW`. Unix-only hardening; Windows temp is per-user.
++
++### Performance (hot path — runs per output line on every filtered run)
++- **`has_error_signal` computed once per line, not up to 14×.** `feed()` scanned
++  each line against the 7-keyword set for the sticky-signal flag, again for
++  `--only-errors`, and ran 2–3 more full-line phrase scans for auto-tune on
++  *every clean line*. All consumers now share a single computed boolean (the
++  auto-tune phrases are a subset of the keyword set, so gating them on it is
++  exact).
++- **Fuzzy line-collapse no longer allocates two `String`s per line.** The
++  adjacent-line "fuzzy signature" comparison (the common non-matching case) now
++  iterates both char streams in lockstep with zero allocation.
++- **Binary detection no longer re-validates the growing 8 KB prefix per line**
++  (was O(n²)); it validates only the new line, which is equivalent since lines
++  split on ASCII `\n`.
++
++### Notes
++- Audited and confirmed correct (no change needed): `shell_escape`, secret
++  redaction, ANSI/terminal sanitization (`safe_label`/`strip_ansi`), the `libc`
++  `unsafe` blocks, file-lock/TOCTOU in the user's own data dir, and integer/
++  memory bounds (`saturating_sub`, line/byte caps).
++
+ ## [0.1.14] - 2026-07-01
+ 
+ ### Added
+diff --git a/src/filter.rs b/src/filter.rs
+index e47c596..574190d 100644
+--- a/src/filter.rs
++++ b/src/filter.rs
+@@ -89,9 +89,11 @@ const MIN_PREFIX_LEN: usize = 2;
+ fn skip_timestamp(line: &str) -> &str {
+     let s = line.trim_start();
+ 
+-    // Check syslog: "Oct 12 10:30:00 " (16 chars)
+-    if s.len() >= 15 {
+-        let month = &s[0..3];
++    // Check syslog: "Oct 12 10:30:00 " (16 chars). Use `get(..)` everywhere so a
++    // multibyte char straddling a fixed byte offset (arbitrary child output can
++    // put a `€`/emoji at offset 3 or 15) can never panic — it just fails the
++    // match and we fall through to returning the line unchanged.
++    if let Some(month) = s.get(0..3) {
+         let is_month = matches!(
+             month,
+             "Jan"
+@@ -111,7 +113,9 @@ fn skip_timestamp(line: &str) -> &str {
+             let bytes = s.as_bytes();
+             // simple check for time colon: e.g. "Oct 12 10:30:00" -> bytes[12] or bytes[13] == ':'
+             if bytes.len() > 14 && (bytes[12] == b':' || bytes[13] == b':') {
+-                return s[15..].trim_start();
++                if let Some(rest) = s.get(15..) {
++                    return rest.trim_start();
++                }
+             }
+         }
+     }
+@@ -161,6 +165,29 @@ fn prefix_with_indent(line: &str) -> Option<&str> {
+     Some(&line[..idx + word.len()])
+ }
+ 
++/// True if `a` and `b` share the same "fuzzy signature": the alphabetic letters
++/// among their first 40 chars are identical and total at least 10 bytes. Computed
++/// by iterating both char streams in lockstep with NO allocation — the previous
++/// version collected a `String` from each line on every adjacent-line comparison
++/// (two heap allocations per non-matching pair, the common case on large output).
++fn same_fuzzy_signature(a: &str, b: &str) -> bool {
++    let mut sa = a.chars().take(40).filter(|c| c.is_alphabetic());
++    let mut sb = b.chars().take(40).filter(|c| c.is_alphabetic());
++    let mut matched_bytes = 0usize;
++    loop {
++        match (sa.next(), sb.next()) {
++            (Some(ca), Some(cb)) => {
++                if ca != cb {
++                    return false;
++                }
++                matched_bytes += ca.len_utf8();
++            }
++            (None, None) => return matched_bytes >= 10, // equal length AND long enough
++            _ => return false,                          // signatures differ in length
++        }
++    }
++}
++
+ /// Two-mode collapser for consecutive similar lines:
+ ///
+ /// 1. **Identical**: exact string match → `line (×N)`
+@@ -241,20 +268,11 @@ impl CollapseLines {
+         }
+ 
+         // --- 80/20 Fuzzy Line Collapse ---
+-        // If the first word differs (e.g. dynamic hashes or IDs at the start),
+-        // we extract the first 40 characters, keep ONLY alphabetic letters, and compare.
+-        // This instantly deduplicates lines like:
+-        // "[info] 123 processing" vs "[info] 456 processing" -> "infoprocessing"
+-        let extract_fuzzy = |s: &str| {
+-            s.chars()
+-                .take(40)
+-                .filter(|c| c.is_alphabetic())
+-                .collect::<String>()
+-        };
+-
+-        let fa = extract_fuzzy(a);
+-        let fb = extract_fuzzy(b);
+-        fa.len() >= 10 && fa == fb
++        // If the first word differs (e.g. dynamic hashes or IDs at the start), we
++        // compare the alphabetic letters among the first 40 chars, requiring ≥10
++        // matching bytes. This deduplicates lines like
++        // "[info] 123 processing" vs "[info] 456 processing" -> "infoprocessing".
++        same_fuzzy_signature(a, b)
+     }
+ 
+     fn emit_pending(&mut self) -> Option<String> {
+@@ -628,23 +646,37 @@ impl FilterPipeline {
+     /// Feed a raw line (already ANSI-stripped). Applies collapse + squeeze + buffer.
+     /// Uses Cow to avoid cloning through the pipeline.
+     pub fn feed(&mut self, line: Cow<'_, str>) {
++        // Compute the error/warning signal AT MOST ONCE per line and reuse it for
++        // all three consumers below (sticky flag, `only_errors` gate, auto-tune
++        // prefilter). `has_error_signal` scans the line against 7 keywords, so the
++        // old code paid up to 14 full-line passes plus the auto-tune phrase scans
++        // on every clean line; this pays one. We only skip the scan when nothing
++        // still needs it (signal already seen, not filtering, already tuned).
++        let sig = if !self.saw_error_signal || self.only_errors || !self.auto_tuned {
++            has_error_signal(line.as_ref())
++        } else {
++            false
++        };
++
+         // Track error/warning signal across the WHOLE stream — even lines later
+         // truncated away. The clean-success squelch must back off if anything
+         // problematic appeared, so the agent keeps the full tail to inspect it.
+-        if !self.saw_error_signal && has_error_signal(line.as_ref()) {
++        if sig {
+             self.saw_error_signal = true;
+         }
+ 
+         // --- 80/20 only_errors Filter ---
+-        if self.only_errors && !has_error_signal(line.as_ref()) {
++        if self.only_errors && !sig {
+             return;
+         }
+ 
+         // --- 80/20 Auto-Tuning Ecosystem Heuristics ---
+         // When a crash signature appears, reshape the head/tail split retroactively.
+         // The tail is already sized to retain a large error window (see runner),
+-        // so we only need to decide how much HEAD to keep.
+-        if !self.auto_tuned {
++        // so we only need to decide how much HEAD to keep. Each signature phrase
++        // contains an error keyword, so it can only appear when `sig` is set —
++        // gating on `sig` skips the phrase scans entirely on clean lines.
++        if !self.auto_tuned && sig {
+             let l = line.as_ref();
+             if contains_ascii_ci(l, "traceback (most recent call last)")
+                 || contains_ascii_ci(l, "panicked at")
+@@ -739,6 +771,49 @@ pub fn looks_binary(data: &[u8]) -> bool {
+ mod tests {
+     use super::*;
+ 
++    /// Regression: arbitrary child output with a multibyte char straddling the
++    /// fixed byte offsets in `skip_timestamp` (3 and 15) used to panic on a
++    /// non-char-boundary slice, aborting the wrapper and swallowing the child's
++    /// exit code. It must now be boundary-safe (no panic) and still skip real
++    /// timestamps.
++    #[test]
++    fn skip_timestamp_is_char_boundary_safe() {
++        for line in [
++            "aa€xxxxxxxxxxxx AAA",           // € spans bytes 2..5 (offset 3 inside)
++            "Oct 12 10:30:0€ AAA",           // € lands on the syslog skip offset 15
++            "日本語ですねとても長いよ TAIL", // multibyte throughout
++            "€",
++            "Jan 01 00:00:0€",
++            "Dec 31 23:59:5\u{1F600} tail", // emoji (4 bytes) at the offset
++        ] {
++            let _ = skip_timestamp(line); // must not panic
++            let _ = first_word(line);
++        }
++        // Genuine timestamps are still stripped.
++        assert_eq!(skip_timestamp("Oct 12 10:30:00 hello world"), "hello world");
++        assert_eq!(skip_timestamp("2024-10-12T10:30:00Z payload"), "payload");
++        assert_eq!(skip_timestamp("plain line no ts"), "plain line no ts");
++    }
++
++    /// The non-allocating fuzzy signature must match the old collect-into-String
++    /// semantics: equal alphabetic letters among the first 40 chars, ≥10 bytes.
++    #[test]
++    fn same_fuzzy_signature_semantics() {
++        assert!(same_fuzzy_signature(
++            "[info] 123 processing data",
++            "[info] 456 processing data"
++        ));
++        assert!(!same_fuzzy_signature("abc", "abc")); // <10 alphabetic bytes
++        assert!(!same_fuzzy_signature(
++            "hello world alpha",
++            "hello world bravo"
++        )); // differ within the window
++        assert!(same_fuzzy_signature(
++            "processing widget 1 now",
++            "processing widget 2 now"
++        ));
++    }
++
+     // ── ANSI strip tests ────────────────────────────────────────────────
+ 
+     #[test]
+diff --git a/src/recovery.rs b/src/recovery.rs
+index 522758a..5010edc 100644
+--- a/src/recovery.rs
++++ b/src/recovery.rs
+@@ -19,7 +19,54 @@
+ 
+ use std::fs::{self, File};
+ use std::io::{BufWriter, Write};
+-use std::path::PathBuf;
++use std::path::{Path, PathBuf};
++
++/// Create the recovery file safely. On Unix the parent dir is forced to a private
++/// `0700` (and rejected if it is a symlink or owned by another user), and the file
++/// is opened `0600` with `O_NOFOLLOW` — so on a shared `/tmp` an attacker can't
++/// pre-plant a symlink at the predictable `recovery-<cmd>-<pid>.log` path to
++/// redirect the write, and the file (un-redacted output that may contain secrets)
++/// isn't world-readable. On non-Unix, Windows temp dirs are already per-user, so
++/// we fall back to the plain create.
++#[cfg(unix)]
++fn create_recovery_file(dir: &Path, path: &Path) -> std::io::Result<File> {
++    use std::io::{Error, ErrorKind};
++    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
++    fs::DirBuilder::new()
++        .recursive(true)
++        .mode(0o700)
++        .create(dir)?;
++    // Reject a hijacked directory; repair our own if an older build left it loose.
++    let md = fs::symlink_metadata(dir)?;
++    if md.file_type().is_symlink() || !md.is_dir() {
++        return Err(Error::new(
++            ErrorKind::AlreadyExists,
++            "recovery dir not a directory",
++        ));
++    }
++    if md.uid() != unsafe { libc::getuid() } {
++        return Err(Error::new(
++            ErrorKind::PermissionDenied,
++            "recovery dir owned by another user",
++        ));
++    }
++    if md.mode() & 0o077 != 0 {
++        fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
++    }
++    fs::OpenOptions::new()
++        .write(true)
++        .create(true)
++        .truncate(true)
++        .mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW)
++        .open(path)
++}
++
++#[cfg(not(unix))]
++fn create_recovery_file(dir: &Path, path: &Path) -> std::io::Result<File> {
++    fs::create_dir_all(dir)?;
++    File::create(path)
++}
+ 
+ /// Flush the prebuffer to disk early if a few giant lines arrive before the
+ /// line-count threshold is crossed (keeps extra memory bounded).
+@@ -84,11 +131,7 @@ impl Recovery {
+                 return;
+             }
+         };
+-        if fs::create_dir_all(&dir).is_err() {
+-            self.failed = true;
+-            return;
+-        }
+-        let file = match File::create(&self.path) {
++        let file = match create_recovery_file(&dir, &self.path) {
+             Ok(f) => f,
+             Err(_) => {
+                 self.failed = true;
+@@ -182,6 +225,72 @@ fn recovery_path(cmd_label: &str) -> PathBuf {
+ mod tests {
+     use super::*;
+ 
++    /// Security: the recovery dir must be private `0700` and the file `0600`, and
++    /// a symlink pre-planted at the (predictable) path must NOT be followed — so a
++    /// shared `/tmp` can't be used to redirect the write or read the secrets it
++    /// may contain.
++    #[cfg(unix)]
++    #[test]
++    fn recovery_file_is_private_and_refuses_symlink() {
++        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
++        let base = std::env::temp_dir().join(format!("l0-rec-sec-{}", std::process::id()));
++        let _ = fs::remove_dir_all(&base);
++        let dir = base.join("l0-cache");
++        let path = dir.join("recovery-test.log");
++
++        // Happy path: dir 0700, file 0600.
++        let f = create_recovery_file(&dir, &path).expect("create should succeed");
++        drop(f);
++        assert_eq!(
++            fs::symlink_metadata(&dir).unwrap().mode() & 0o777,
++            0o700,
++            "recovery dir must be private"
++        );
++        assert_eq!(
++            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
++            0o600,
++            "recovery file must be private"
++        );
++        fs::remove_file(&path).unwrap();
++
++        // Symlink attack: a symlink at the path must not be followed (O_NOFOLLOW).
++        let victim = base.join("victim.txt");
++        fs::write(&victim, b"IMPORTANT\n").unwrap();
++        symlink(&victim, &path).unwrap();
++        assert!(
++            create_recovery_file(&dir, &path).is_err(),
++            "must refuse to follow a symlink at the recovery path"
++        );
++        assert_eq!(
++            fs::read_to_string(&victim).unwrap(),
++            "IMPORTANT\n",
++            "victim file must be untouched"
++        );
++        let _ = fs::remove_dir_all(&base);
++    }
++
++    /// A world-traversable recovery dir left by an older build is tightened to
++    /// `0700` on next use.
++    #[cfg(unix)]
++    #[test]
++    fn recovery_repairs_loose_dir() {
++        use std::os::unix::fs::{MetadataExt, PermissionsExt};
++        let base = std::env::temp_dir().join(format!("l0-rec-repair-{}", std::process::id()));
++        let _ = fs::remove_dir_all(&base);
++        let dir = base.join("l0-cache");
++        fs::create_dir_all(&dir).unwrap();
++        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
++        let path = dir.join("recovery-x.log");
++        let f = create_recovery_file(&dir, &path).expect("create should succeed");
++        drop(f);
++        assert_eq!(
++            fs::symlink_metadata(&dir).unwrap().mode() & 0o777,
++            0o700,
++            "a loose dir must be tightened to 0700"
++        );
++        let _ = fs::remove_dir_all(&base);
++    }
++
+     #[test]
+     fn inactive_never_touches_disk() {
+         let mut r = Recovery::new(false, "x", 2);
+diff --git a/src/runner.rs b/src/runner.rs
+index 859ef7a..ffd752b 100644
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -387,11 +387,16 @@ pub fn run_captured(
+         }
+         raw_bytes_total += raw_len;
+ 
+-        // Binary detection on first ~8KB
++        // Binary detection on the first ~8KB. We validate only the NEW line, not
++        // the whole growing chunk: lines split on `\n` (ASCII), so a chunk is
++        // valid UTF-8 iff every line is, and a NUL in the chunk is a NUL in some
++        // line — equivalent to the old whole-chunk re-scan but without its O(n²)
++        // re-validation of the accumulating prefix. `first_chunk` is still
++        // accumulated for the binary-output banner shown later.
+         if first_chunk.len() < 8192 {
+             first_chunk.extend_from_slice(&line_buf);
+             first_chunk.push(b'\n');
+-            if filter::looks_binary(&first_chunk) {
++            if filter::looks_binary(&line_buf) {
+                 is_binary = true;
+                 break;
+             }

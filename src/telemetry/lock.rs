@@ -1,6 +1,8 @@
 //! Advisory file locking for telemetry sidecar files.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
 /// Advisory file lock. On unix this is `flock(2)` on a sidecar lock file:

@@ -37,6 +37,24 @@ so the transparent Claude Code / Gemini CLI hook works without cloning the repo:
 l0-compressor-claude-hook install && l0-compressor-claude-hook enable
 ```
 
+## Windows (experimental)
+
+Native Windows support is experimental: master builds and passes a native
+smoke test in CI, and starting from the next tagged release a
+`l0-compressor-x86_64-pc-windows-msvc.zip` is attached to the GitHub Release.
+Until then, build from source:
+
+```powershell
+git clone https://github.com/fabriziosalmi/l0-compressor.git
+cd l0-compressor
+cargo build --release
+# binary: target\release\l0-compressor.exe
+```
+
+See [Cross-Platform → Windows](/internals/cross-platform#windows-experimental)
+for the behavioral differences (no shell, best-effort stderr interleaving,
+console Ctrl-C semantics).
+
 ## From source (non-interactive)
 
 Builds with Rust/Cargo and installs to `~/.local/bin/` (requires Git and a Rust

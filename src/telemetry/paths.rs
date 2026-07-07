@@ -28,6 +28,26 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
         }
     }
 
+    // 3. Windows: LOCALAPPDATA, then USERPROFILE (HOME is usually unset there)
+    #[cfg(not(unix))]
+    {
+        if let Ok(appdata) = std::env::var("LOCALAPPDATA") {
+            if !appdata.is_empty() {
+                return Some(PathBuf::from(appdata).join("l0-compressor"));
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            if !profile.is_empty() {
+                return Some(
+                    PathBuf::from(profile)
+                        .join(".local")
+                        .join("share")
+                        .join("l0-compressor"),
+                );
+            }
+        }
+    }
+
     // 3. Fallback: /etc/passwd lookup (for LXC, cron, systemd without User=)
     #[cfg(unix)]
     {
