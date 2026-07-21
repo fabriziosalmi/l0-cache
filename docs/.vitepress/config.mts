@@ -1,10 +1,28 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
+  head: [
+    // Tutto first-party. 'unsafe-inline' serve perche' VitePress emette
+    // uno script inline per il tema e stili inline.
+    [
+      'meta',
+      {
+        'http-equiv': 'Content-Security-Policy',
+        content:
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; " +
+          "style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+          "font-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'",
+      },
+    ],
+  ],
   title: 'l0-compressor',
   description: 'Lightweight CLI proxy for LLM token savings',
   base: '/l0-compressor/',
   themeConfig: {
+    footer: {
+      message:
+        '<a href="https://fabriziosalmi.github.io/privacy">Privacy &amp; legal</a>',
+    },
     nav: [
       { text: 'Guide', link: '/guide/' },
       { text: 'Reference', link: '/reference/' },
