@@ -2793,8 +2793,9 @@ fn step5_lookup_returns_none_when_file_missing() {
 #[test]
 fn step5_save_then_lookup_roundtrips() {
     let path = step5_tmp_path("roundtrip");
+    // Timestamp must be fresh: lookup drops entries older than the TTL.
     let t = TunedParams {
-        ts: "2026-06-10T00:00:00Z".to_string(),
+        ts: to_rfc3339(now_unix_secs()),
         cmd: "curl".to_string(),
         args_hash: "deadbeef".to_string(),
         head: 12,
