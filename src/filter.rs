@@ -81,6 +81,23 @@ pub fn has_error_signal(line: &str) -> bool {
         .any(|kw| contains_ascii_ci(line, kw))
 }
 
+/// The subset of [`ERROR_SIGNAL_KEYWORDS`] that marks a line an agent must ACT on, as opposed
+/// to merely notice. `warn` is deliberately absent: near-identical warnings are the bulk of the
+/// noise this tool exists to collapse, and collapsing them loses nothing an agent needed.
+///
+/// Everything here, by contrast, is a distinct thing to fix — two failing tests, two compiler
+/// diagnostics — and merging two of them hides one completely.
+const ACTIONABLE_KEYWORDS: [&str; 6] =
+    ["error", "fail", "exception", "panic", "traceback", "fatal"];
+
+/// Whether `line` reports something an agent must act on. Used to exempt a line from FUZZY
+/// collapse, where the signature ignores digits and would merge two distinct diagnostics.
+pub fn is_actionable_diagnostic(line: &str) -> bool {
+    ACTIONABLE_KEYWORDS
+        .iter()
+        .any(|kw| contains_ascii_ci(line, kw))
+}
+
 // ── Line Collapse (Identical + Prefix-based) ────────────────────────────────
 
 const MIN_PREFIX_LEN: usize = 2;
@@ -231,8 +248,28 @@ impl CollapseLines {
                 self.repeat_count += 1;
                 None
             }
-            // Case 2: Same prefix (first word) — prefix-collapse
-            Some(prev) if self.same_prefix(prev, line.as_ref()) => {
+            // Case 2: Same prefix (first word) — prefix-collapse.
+            //
+            // NOT for error lines. `same_fuzzy_signature` compares only the ALPHABETIC
+            // characters, which is right for "[info] 123 processing" vs "[info] 456 processing"
+            // but destroys the only thing distinguishing two compiler diagnostics:
+            //
+            //   error[E0367]: cannot find value `alpha` in this scope
+            //   error[E0368]: cannot find value `beta`  in this scope
+            //
+            // Both reduce to "errorEcannotfindvalueinthisscope", so they used to collapse into
+            // `error[E0367]: ... (×2)` and the agent reading the output never learned the second
+            // error existed. Same for two test failures differing only by a number.
+            //
+            // The guard uses `is_actionable_diagnostic`, NOT `has_error_signal`: the latter also
+            // matches "warn", and near-identical warnings are exactly the noise this collapse
+            // exists to remove. Exact duplicates (Case 1) still collapse either way — a
+            // byte-identical error repeated really is one message.
+            Some(prev)
+                if !is_actionable_diagnostic(prev)
+                    && !is_actionable_diagnostic(line.as_ref())
+                    && self.same_prefix(prev, line.as_ref()) =>
+            {
                 if self.first_in_run.is_none() {
                     // Start prefix run. Move the first line of the run to first_in_run.
                     self.first_in_run = self.last_line.take();
@@ -1108,6 +1145,86 @@ mod tests {
         let flushed = c.flush();
         // same_prefix is false for single-char strings, so it emits exact repeats
         assert_eq!(flushed, Some("b (×3)".into()));
+    }
+
+    /// Regression: two DISTINCT compiler errors must never merge. `same_fuzzy_signature`
+    /// compares alphabetic characters only, so the error codes and identifiers that
+    /// distinguish them are invisible to it — the guard in `feed` is what keeps them apart.
+    /// Two failing tests that differ only by a number are two things to fix, not one.
+    #[test]
+    fn distinct_test_failures_are_never_fuzzy_collapsed() {
+        let mut c = CollapseLines::new();
+        let mut out = Vec::new();
+        for l in ["test case_1 ... FAILED", "test case_2 ... FAILED"] {
+            if let Some(e) = c.feed(Cow::Borrowed(l)) {
+                out.push(e);
+            }
+        }
+        if let Some(e) = c.flush() {
+            out.push(e);
+        }
+        let joined = out.join("\n");
+        assert!(
+            joined.contains("case_1") && joined.contains("case_2"),
+            "lost a failure: {joined}"
+        );
+    }
+
+    #[test]
+    fn distinct_error_lines_are_never_fuzzy_collapsed() {
+        let mut c = CollapseLines::new();
+        let mut out = Vec::new();
+        for l in [
+            "error[E0367]: cannot find value `alpha` in this scope",
+            "error[E0368]: cannot find value `beta` in this scope",
+            "error[E0369]: cannot find value `gamma` in this scope",
+        ] {
+            if let Some(e) = c.feed(Cow::Borrowed(l)) {
+                out.push(e);
+            }
+        }
+        if let Some(e) = c.flush() {
+            out.push(e);
+        }
+        let joined = out.join("\n");
+        for needle in ["E0367", "E0368", "E0369", "alpha", "beta", "gamma"] {
+            assert!(joined.contains(needle), "lost {needle} from: {joined}");
+        }
+        assert!(!joined.contains("(×"), "errors were collapsed: {joined}");
+    }
+
+    /// The guard is scoped to fuzzy/prefix collapse. A byte-identical error repeated 200 times
+    /// is genuinely one message and must still collapse, or a flapping build floods the context.
+    #[test]
+    fn identical_error_lines_still_collapse() {
+        let mut c = CollapseLines::new();
+        let line = "error[E0308]: mismatched types";
+        for _ in 0..200 {
+            let _ = c.feed(Cow::Borrowed(line));
+        }
+        let out = c.flush().unwrap_or_default();
+        assert!(
+            out.contains("×200"),
+            "identical errors should still collapse: {out}"
+        );
+    }
+
+    /// Warnings are not errors: the noisy-warning collapse that makes the tool useful on cargo
+    /// output must be unaffected by the guard.
+    #[test]
+    fn warning_lines_still_prefix_collapse() {
+        let mut c = CollapseLines::new();
+        let mut emitted = 0usize;
+        for i in 0..50 {
+            if c.feed(Cow::Owned(format!("warning: unused variable `tmp{i}`")))
+                .is_some()
+            {
+                emitted += 1;
+            }
+        }
+        let tail = c.flush().unwrap_or_default();
+        assert!(tail.contains("(×"), "warnings must still collapse: {tail}");
+        assert_eq!(emitted, 0, "nothing should have been emitted mid-run");
     }
 
     #[test]
