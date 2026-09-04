@@ -25,6 +25,9 @@ export default defineConfig({
   title: 'l0-compressor',
   description: 'Lightweight CLI proxy for LLM token savings',
   base: '/l0-compressor/',
+  // The hostname carries the base path on purpose: VitePress joins it with each
+  // page's route, so without it every URL in the sitemap would point at a 404.
+  sitemap: { hostname: 'https://fabriziosalmi.github.io/l0-compressor/' },
   themeConfig: {
     footer: {
       message:
